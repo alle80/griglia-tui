@@ -38,7 +38,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = true
 		return m, m.loadTasks()
 	case tea.KeyPressMsg:
-		if matches(msg, keys.ForceQuit) || matches(msg, keys.Quit) {
+		if matches(msg, keys.ForceQuit) || (m.route != routeForm && matches(msg, keys.Quit)) {
 			return m, tea.Quit
 		}
 		if m.route != routeForm && matches(msg, keys.Help) {

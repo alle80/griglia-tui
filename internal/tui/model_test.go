@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -151,6 +152,18 @@ func TestSuccessfulTaskCreation(t *testing.T) {
 	model, _ = update(t, model, cmd())
 	if model.loading || model.selectedID != 10 || !strings.Contains(model.render(), "Created interactively") {
 		t.Fatalf("created model=%+v view=%q", model, model.render())
+	}
+}
+
+func TestUppercaseQIsTextInTaskForm(t *testing.T) {
+	model := load(t, New(context.Background(), &fakeService{}))
+	model, _ = update(t, model, key("n"))
+	model, cmd := update(t, model, key("Q"))
+	if cmd != nil && reflect.TypeOf(cmd()) == reflect.TypeOf(tea.Quit()) {
+		t.Fatal("uppercase Q returned the global quit command while editing")
+	}
+	if got := model.form.inputs[0].Value(); got != "Q" {
+		t.Fatalf("title value=%q, want Q", got)
 	}
 }
 
