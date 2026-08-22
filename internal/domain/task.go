@@ -81,6 +81,12 @@ type Task struct {
 	Version           int64
 }
 
+type Project struct {
+	ID        string
+	Name      string
+	CreatedAt time.Time
+}
+
 func ValidateTitle(title string) error {
 	if strings.TrimSpace(title) == "" || len([]rune(title)) > MaxTitleLength {
 		return ErrInvalid

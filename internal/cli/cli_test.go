@@ -104,6 +104,17 @@ func TestJSONEnvelopesAndStreams(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &env); err != nil {
 		t.Fatal(err)
 	}
+	code, out, stderr = run(t, dir, "task", "add", "Ready task", "--lifecycle", "ready", "--json")
+	if code != 0 || stderr != "" {
+		t.Fatalf("ready add: %d %q", code, stderr)
+	}
+	if err := json.Unmarshal([]byte(out), &env); err != nil {
+		t.Fatal(err)
+	}
+	task := env["data"].(map[string]any)["task"].(map[string]any)
+	if task["operational_state"] != nil {
+		t.Fatalf("ready operational_state=%v, want null", task["operational_state"])
+	}
 }
 
 func TestExplicitProjectAndVersion(t *testing.T) {
@@ -119,9 +130,30 @@ func TestExplicitProjectAndVersion(t *testing.T) {
 	}
 }
 
-func TestUsageErrorExitCode(t *testing.T) {
-	code, out, stderr := run(t, t.TempDir(), "task", "show")
-	if code != 2 || out != "" || !strings.Contains(stderr, "accepts") {
-		t.Fatalf("code=%d out=%q stderr=%q", code, out, stderr)
+func TestUsageErrorsAreInvalidInput(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"missing positional argument", []string{"task", "show"}},
+		{"too many positional arguments", []string{"task", "show", "1", "2"}},
+		{"unknown flag", []string{"task", "show", "1", "--unknown"}},
+		{"unknown command", []string{"unknown"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string{"--json"}, tc.args...)
+			code, out, stderr := run(t, t.TempDir(), args...)
+			if code != 2 || stderr != "" {
+				t.Fatalf("code=%d stderr=%q", code, stderr)
+			}
+			var env envelope
+			if err := json.Unmarshal([]byte(out), &env); err != nil {
+				t.Fatalf("invalid JSON %q: %v", out, err)
+			}
+			if env.Ok || env.Error == nil || env.Error.Code != "invalid_input" {
+				t.Fatalf("envelope=%+v", env)
+			}
+		})
 	}
 }

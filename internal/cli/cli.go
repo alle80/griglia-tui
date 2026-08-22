@@ -41,17 +41,46 @@ func Run(args []string, stdout, stderr io.Writer, opts Options) int {
 	s := &state{out: stdout, errOut: stderr, opts: opts}
 	root := s.root()
 	root.SetArgs(args)
+	// Find does not parse flags. Capture the presentation mode before command
+	// resolution so an unknown command still receives the requested envelope.
+	for _, arg := range args {
+		if arg == "--json" || arg == "--json=true" {
+			s.json = true
+		} else if arg == "--json=false" {
+			s.json = false
+		}
+	}
+	if _, _, err := root.Find(args); err != nil {
+		ce := &commandError{2, "invalid_input", err.Error()}
+		s.writeError(ce)
+		return ce.code
+	}
 	if err := root.Execute(); err != nil {
 		ce := mapError(err)
-		if s.json {
-			_ = writeJSON(stdout, nil, &errorDTO{Code: ce.kind, Message: ce.message})
-		} else {
-			fmt.Fprintln(stderr, "Error:", ce.message)
-		}
+		s.writeError(ce)
 		return ce.code
 	}
 	return 0
 }
+
+func (s *state) writeError(ce *commandError) {
+	if s.json {
+		_ = writeJSON(s.out, nil, &errorDTO{Code: ce.kind, Message: ce.message})
+	} else {
+		fmt.Fprintln(s.errOut, "Error:", ce.message)
+	}
+}
+
+func exactArgs(count int) cobra.PositionalArgs {
+	return func(cmd *cobra.Command, args []string) error {
+		if len(args) != count {
+			return &commandError{2, "invalid_input", fmt.Sprintf("%s accepts %d arg(s), received %d", cmd.CommandPath(), count, len(args))}
+		}
+		return nil
+	}
+}
+
+func noArgs(cmd *cobra.Command, args []string) error { return exactArgs(0)(cmd, args) }
 
 func (s *state) root() *cobra.Command {
 	root := &cobra.Command{Use: "griglia", Short: "A local, transactional todo list", SilenceErrors: true, SilenceUsage: true}
@@ -67,7 +96,7 @@ func (s *state) root() *cobra.Command {
 }
 
 func (s *state) versionCommand() *cobra.Command {
-	return &cobra.Command{Use: "version", Short: "Print the version", Args: cobra.NoArgs, RunE: func(*cobra.Command, []string) error {
+	return &cobra.Command{Use: "version", Short: "Print the version", Args: noArgs, RunE: func(*cobra.Command, []string) error {
 		if s.json {
 			return writeJSON(s.out, map[string]any{"version": s.opts.Version}, nil)
 		}
@@ -78,7 +107,7 @@ func (s *state) versionCommand() *cobra.Command {
 
 func (s *state) initCommand() *cobra.Command {
 	var name string
-	cmd := &cobra.Command{Use: "init", Short: "Initialize a Griglia project", Args: cobra.NoArgs, RunE: func(*cobra.Command, []string) error {
+	cmd := &cobra.Command{Use: "init", Short: "Initialize a Griglia project", Args: noArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		root := s.project
 		if root == "" {
 			root = os.Getenv("GRIGLIA_PROJECT")
@@ -118,7 +147,7 @@ func (s *state) initCommand() *cobra.Command {
 		if err != nil {
 			return fmt.Errorf("generate project UUID: %w", err)
 		}
-		if _, err = store.DB().Exec(`INSERT INTO projects(id,name,created_at) VALUES(?,?,?)`, id, name, time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")); err != nil {
+		if err = store.CreateProject(cmd.Context(), domain.Project{ID: id, Name: name, CreatedAt: time.Now().UTC()}); err != nil {
 			return err
 		}
 		if s.json {
@@ -139,7 +168,7 @@ func (s *state) taskCommand() *cobra.Command {
 
 func (s *state) addCommand() *cobra.Command {
 	var description, priority, lifecycle string
-	cmd := &cobra.Command{Use: "add TITLE", Short: "Add a task", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "add TITLE", Short: "Add a task", Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		p, err := domain.ParsePriority(priority)
 		if err != nil {
 			return &commandError{2, "invalid_input", "priority must be low, normal, high, or urgent"}
@@ -170,7 +199,7 @@ func (s *state) addCommand() *cobra.Command {
 }
 
 func (s *state) listCommand() *cobra.Command {
-	return &cobra.Command{Use: "list", Short: "List tasks", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+	return &cobra.Command{Use: "list", Short: "List tasks", Args: noArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		service, closeFn, err := s.service()
 		if err != nil {
 			return err
@@ -201,7 +230,7 @@ func (s *state) listCommand() *cobra.Command {
 }
 
 func (s *state) showCommand() *cobra.Command {
-	return &cobra.Command{Use: "show ID", Short: "Show a task", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	return &cobra.Command{Use: "show ID", Short: "Show a task", Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		id, err := strconv.ParseInt(args[0], 10, 64)
 		if err != nil || id < 1 {
 			return &commandError{2, "invalid_input", "task ID must be a positive integer"}
@@ -275,10 +304,6 @@ type taskDTO struct {
 
 func toTaskDTO(t domain.Task) taskDTO {
 	d := taskDTO{ID: t.ID, UID: t.UID, Title: t.Title, Description: t.Description, Lifecycle: t.Lifecycle, Priority: t.Priority, Progress: t.Progress, Phase: t.Phase, CompletionSummary: t.CompletionSummary, CreatedAt: formatJSONTime(t.CreatedAt), UpdatedAt: formatJSONTime(t.UpdatedAt), Version: t.Version}
-	if t.Lifecycle == domain.LifecycleReady {
-		v := "available"
-		d.OperationalState = &v
-	}
 	if t.CompletedAt != nil {
 		v := formatJSONTime(*t.CompletedAt)
 		d.CompletedAt = &v
@@ -316,13 +341,6 @@ func mapError(err error) *commandError {
 	}
 	if errors.Is(err, domain.ErrConflict) {
 		return &commandError{5, "conflict", err.Error()}
-	}
-	// Cobra reports command/argument usage errors as ordinary errors. They are
-	// part of the public CLI contract and must not become internal failures.
-	for _, marker := range []string{"unknown command", "requires ", "accepts ", "unknown shorthand flag"} {
-		if strings.Contains(err.Error(), marker) {
-			return &commandError{2, "invalid_input", err.Error()}
-		}
 	}
 	return &commandError{1, "internal_error", "internal error"}
 }

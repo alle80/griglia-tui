@@ -42,7 +42,11 @@ func Open(path string) (*Store, error) {
 }
 
 func (s *Store) Close() error { return s.db.Close() }
-func (s *Store) DB() *sql.DB  { return s.db }
+
+func (s *Store) CreateProject(ctx context.Context, project domain.Project) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO projects(id,name,created_at) VALUES(?,?,?)`, project.ID, project.Name, formatTime(project.CreatedAt))
+	return err
+}
 
 func (s *Store) migrate(ctx context.Context) error {
 	conn, err := s.db.Conn(ctx)
