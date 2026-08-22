@@ -77,7 +77,10 @@ func (m Model) listView() string {
 	if m.status != "" {
 		lines = append(lines, "", statusStyle.Render("✓ "+m.status))
 	}
-	lines = append(lines, "", mutedStyle.Render("j/k move · enter detail · n new · ? help · r reload · Q quit"))
+	if m.actionErr != nil {
+		lines = append(lines, "", errorStyle.Render(m.actionErr.Error()))
+	}
+	lines = append(lines, "", mutedStyle.Render("j/k move · enter detail · n new · e edit · ? help · Q quit"))
 	return strings.Join(lines, "\n")
 }
 
@@ -134,17 +137,35 @@ func (m Model) detailView() string {
 	if task.CompletionSummary != "" {
 		lines = append(lines, "", "Completion summary", task.CompletionSummary)
 	}
-	lines = append(lines, "", mutedStyle.Render("q back · ? help · Q quit"))
+	if m.actionErr != nil {
+		lines = append(lines, "", errorStyle.Render(m.actionErr.Error()))
+	}
+	lines = append(lines, "", mutedStyle.Render("e edit · a ready · d done · x cancel · q back · ? help"))
 	return strings.Join(lines, "\n")
 }
 
 func (m Model) helpView() string {
-	return strings.Join([]string{titleStyle.Render("HELP"), "", "j / ↓       select next task", "k / ↑       select previous task", "enter       open task detail", "n           create a task", "r           reload tasks", "?           open or close help", "q / esc     return to the list", "Q / ctrl+c  quit", "", mutedStyle.Render("Press q or ? to close help.")}, "\n")
+	return strings.Join([]string{titleStyle.Render("HELP"), "", "j / ↓       select next task", "k / ↑       select previous task", "enter       open task detail", "n           create a task", "e           edit selected task", "a           mark backlog task ready", "d           complete ready task", "x           cancel backlog/ready task", "r           reload tasks", "?           open or close help", "q / esc     return to the list", "Q / ctrl+c  quit", "", mutedStyle.Render("Lifecycle actions are validated; errors are recoverable.")}, "\n")
 }
 
 func (m Model) formView() string {
+	if m.form.cancelling {
+		lines := []string{titleStyle.Render("CANCEL TASK"), "", selectedStyle.Render("Reason (optional)"), m.form.inputs[0].View(), ""}
+		if m.form.err != nil {
+			lines = append(lines, errorStyle.Render(m.form.err.Error()), "")
+		}
+		if m.form.saving {
+			lines = append(lines, "Saving…", "")
+		}
+		lines = append(lines, mutedStyle.Render("enter cancel task · esc back · Ctrl-C quit"))
+		return strings.Join(lines, "\n")
+	}
 	labels := []string{"Title", "Description", "Priority"}
-	lines := []string{titleStyle.Render("NEW TASK"), ""}
+	heading := "NEW TASK"
+	if m.form.editing {
+		heading = "EDIT TASK"
+	}
+	lines := []string{titleStyle.Render(heading), ""}
 	for i, input := range m.form.inputs {
 		label := labels[i]
 		if i == m.form.focus {

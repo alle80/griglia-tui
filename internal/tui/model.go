@@ -13,6 +13,10 @@ import (
 type Service interface {
 	ListTasks(context.Context) ([]domain.Task, error)
 	AddTask(context.Context, app.AddTaskInput) (domain.Task, error)
+	EditTask(context.Context, int64, app.EditTaskInput) (domain.Task, error)
+	MarkReady(context.Context, int64) (domain.Task, error)
+	CompleteTask(context.Context, int64) (domain.Task, error)
+	CancelTask(context.Context, int64, string) (domain.Task, error)
 }
 
 type route uint8
@@ -34,6 +38,12 @@ type taskCreatedMsg struct {
 	err  error
 }
 
+type taskMutatedMsg struct {
+	task   domain.Task
+	action string
+	err    error
+}
+
 type Model struct {
 	ctx        context.Context
 	service    Service
@@ -45,16 +55,37 @@ type Model struct {
 	loading    bool
 	err        error
 	status     string
+	actionErr  error
 	width      int
 	height     int
 	form       formModel
 }
 
 type formModel struct {
-	inputs [3]textinput.Model
-	focus  int
-	err    error
-	saving bool
+	inputs     [3]textinput.Model
+	focus      int
+	err        error
+	saving     bool
+	editing    bool
+	cancelling bool
+	taskID     int64
+}
+
+func newEditForm(task domain.Task) formModel {
+	f := newForm()
+	f.editing, f.taskID = true, task.ID
+	f.inputs[0].SetValue(task.Title)
+	f.inputs[1].SetValue(task.Description)
+	f.inputs[2].SetValue(string(task.Priority))
+	return f
+}
+
+func newCancelForm(task domain.Task) formModel {
+	f := newForm()
+	f.cancelling, f.taskID = true, task.ID
+	f.inputs[0].Placeholder = "Optional cancellation reason"
+	f.inputs[0].CharLimit = 0
+	return f
 }
 
 func New(ctx context.Context, service Service) Model {
@@ -96,6 +127,36 @@ func (m Model) createTask(input app.AddTaskInput) tea.Cmd {
 	return func() tea.Msg {
 		task, err := m.service.AddTask(m.ctx, input)
 		return taskCreatedMsg{task: task, err: err}
+	}
+}
+
+func (m Model) editTask(id int64, input app.EditTaskInput) tea.Cmd {
+	return func() tea.Msg {
+		task, err := m.service.EditTask(m.ctx, id, input)
+		return taskMutatedMsg{task: task, action: "Edited", err: err}
+	}
+}
+
+func (m Model) mutateTask(action string, id int64) tea.Cmd {
+	return func() tea.Msg {
+		var task domain.Task
+		var err error
+		switch action {
+		case "Ready":
+			task, err = m.service.MarkReady(m.ctx, id)
+		case "Completed":
+			task, err = m.service.CompleteTask(m.ctx, id)
+		case "Cancelled":
+			task, err = m.service.CancelTask(m.ctx, id, "")
+		}
+		return taskMutatedMsg{task: task, action: action, err: err}
+	}
+}
+
+func (m Model) cancelTask(id int64, reason string) tea.Cmd {
+	return func() tea.Msg {
+		task, err := m.service.CancelTask(m.ctx, id, reason)
+		return taskMutatedMsg{task: task, action: "Cancelled", err: err}
 	}
 }
 

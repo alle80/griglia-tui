@@ -3,7 +3,7 @@ package tui
 import tea "charm.land/bubbletea/v2"
 
 type keymap struct {
-	Down, Up, Open, New, Help, Back, Quit, ForceQuit []string
+	Down, Up, Open, New, Edit, Ready, Done, Cancel, Help, Back, Quit, ForceQuit []string
 }
 
 var keys = keymap{
@@ -11,6 +11,10 @@ var keys = keymap{
 	Up:        []string{"k", "up"},
 	Open:      []string{"enter"},
 	New:       []string{"n"},
+	Edit:      []string{"e"},
+	Ready:     []string{"a"},
+	Done:      []string{"d"},
+	Cancel:    []string{"x"},
 	Help:      []string{"?"},
 	Back:      []string{"q", "esc"},
 	Quit:      []string{"Q"},

@@ -25,6 +25,19 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.tasks = msg.tasks
 		m.restoreSelection()
 		return m, nil
+	case taskMutatedMsg:
+		m.form.saving = false
+		if msg.err != nil {
+			if m.route == routeForm {
+				m.form.err = msg.err
+			} else {
+				m.actionErr = msg.err
+			}
+			return m, nil
+		}
+		m.selectedID, m.status, m.actionErr = msg.task.ID, fmt.Sprintf("%s task #%d", msg.action, msg.task.ID), nil
+		m.route, m.form, m.loading = routeList, newForm(), true
+		return m, m.loadTasks()
 	case taskCreatedMsg:
 		m.form.saving = false
 		if msg.err != nil {
@@ -58,7 +71,13 @@ func (m Model) updateRoute(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch m.route {
 	case routeList:
 		return m.updateList(msg)
-	case routeDetail, routeHelp:
+	case routeDetail:
+		if matches(msg, keys.Back) {
+			m.route = routeList
+			return m, nil
+		}
+		return m.updateTaskAction(msg)
+	case routeHelp:
 		if matches(msg, keys.Back) {
 			if m.route == routeHelp {
 				m.route = m.previous
@@ -95,6 +114,30 @@ func (m Model) updateList(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case msg.String() == "r":
 		m.loading, m.err = true, nil
 		return m, m.loadTasks()
+	default:
+		return m.updateTaskAction(msg)
+	}
+	return m, nil
+}
+
+func (m Model) updateTaskAction(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if len(m.tasks) == 0 {
+		return m, nil
+	}
+	task := m.tasks[m.selected]
+	switch {
+	case matches(msg, keys.Edit):
+		m.form = newEditForm(task)
+		m.sizeForm()
+		m.route = routeForm
+	case matches(msg, keys.Ready):
+		return m, m.mutateTask("Ready", task.ID)
+	case matches(msg, keys.Done):
+		return m, m.mutateTask("Completed", task.ID)
+	case matches(msg, keys.Cancel):
+		m.form = newCancelForm(task)
+		m.sizeForm()
+		m.route = routeForm
 	}
 	return m, nil
 }
@@ -107,6 +150,18 @@ func (m Model) updateForm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.form.saving {
 		return m, nil
+	}
+	if m.form.cancelling {
+		if msg.String() == "enter" {
+			m.form.err, m.form.saving = nil, true
+			return m, m.cancelTask(m.form.taskID, m.form.inputs[0].Value())
+		}
+		var cmd tea.Cmd
+		m.form.inputs[0], cmd = m.form.inputs[0].Update(msg)
+		if m.form.err != nil {
+			m.form.err = nil
+		}
+		return m, cmd
 	}
 	switch msg.String() {
 	case "tab", "down":
@@ -127,6 +182,10 @@ func (m Model) updateForm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.form.err = nil
 		m.form.saving = true
+		if m.form.editing {
+			title, description := m.form.inputs[0].Value(), m.form.inputs[1].Value()
+			return m, m.editTask(m.form.taskID, app.EditTaskInput{Title: &title, Description: &description, Priority: &priority})
+		}
 		return m, m.createTask(app.AddTaskInput{Title: m.form.inputs[0].Value(), Description: m.form.inputs[1].Value(), Priority: priority, Lifecycle: domain.LifecycleBacklog})
 	}
 	var cmd tea.Cmd
