@@ -93,3 +93,12 @@ func ValidateTitle(title string) error {
 	}
 	return nil
 }
+
+func ValidateTransition(from, to Lifecycle) error {
+	valid := (from == LifecycleBacklog && (to == LifecycleReady || to == LifecycleCancelled)) ||
+		(from == LifecycleReady && (to == LifecycleDone || to == LifecycleCancelled))
+	if !valid {
+		return fmt.Errorf("cannot move task from %s to %s: %w", from, to, ErrConflict)
+	}
+	return nil
+}

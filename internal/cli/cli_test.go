@@ -71,6 +71,55 @@ func TestTaskFlowAndOrdering(t *testing.T) {
 	}
 }
 
+func TestLifecycleCommandsHumanAndJSON(t *testing.T) {
+	dir := t.TempDir()
+	if code, _, _ := run(t, dir, "init"); code != 0 {
+		t.Fatal(code)
+	}
+	if code, _, _ := run(t, dir, "task", "add", "Lifecycle"); code != 0 {
+		t.Fatal(code)
+	}
+	code, out, stderr := run(t, dir, "task", "edit", "1", "--title", "Edited", "--description", "details", "--priority", "high")
+	if code != 0 || stderr != "" || !strings.Contains(out, "Edited task #1") {
+		t.Fatalf("edit: %d %q %q", code, out, stderr)
+	}
+	code, out, stderr = run(t, dir, "task", "ready", "1", "--json")
+	if code != 0 || stderr != "" || !strings.Contains(out, `"lifecycle":"ready"`) || !strings.Contains(out, `"version":3`) {
+		t.Fatalf("ready: %d %q %q", code, out, stderr)
+	}
+	code, out, stderr = run(t, dir, "task", "done", "1", "--json")
+	if code != 0 || stderr != "" || !strings.Contains(out, `"lifecycle":"done"`) || !strings.Contains(out, `"progress":100`) {
+		t.Fatalf("done: %d %q %q", code, out, stderr)
+	}
+	if code, _, stderr = run(t, dir, "task", "cancel", "1"); code != 5 || !strings.Contains(stderr, "cannot move") {
+		t.Fatalf("terminal: %d %q", code, stderr)
+	}
+	if code, _, _ = run(t, dir, "task", "add", "Cancel"); code != 0 {
+		t.Fatal(code)
+	}
+	if code, out, stderr = run(t, dir, "task", "cancel", "2", "--reason", "obsolete"); code != 0 || stderr != "" || !strings.Contains(out, "Cancelled") {
+		t.Fatalf("cancel: %d %q %q", code, out, stderr)
+	}
+}
+
+func TestLifecycleCommandValidation(t *testing.T) {
+	dir := t.TempDir()
+	if code, _, _ := run(t, dir, "init"); code != 0 {
+		t.Fatal(code)
+	}
+	for _, tc := range []struct {
+		args []string
+		code int
+	}{
+		{[]string{"task", "edit", "1"}, 2}, {[]string{"task", "edit", "1", "--priority", "bad"}, 2}, {[]string{"task", "ready", "bad"}, 2}, {[]string{"task", "done", "99"}, 4},
+	} {
+		code, out, stderr := run(t, dir, append([]string{"--json"}, tc.args...)...)
+		if code != tc.code || stderr != "" || !strings.Contains(out, `"ok":false`) {
+			t.Fatalf("args=%v code=%d out=%q err=%q", tc.args, code, out, stderr)
+		}
+	}
+}
+
 func TestJSONEnvelopesAndStreams(t *testing.T) {
 	dir := t.TempDir()
 	code, out, stderr := run(t, dir, "--json", "task", "list")

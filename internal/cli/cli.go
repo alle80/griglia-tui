@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -173,8 +174,114 @@ func (s *state) initCommand() *cobra.Command {
 
 func (s *state) taskCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "task", Short: "Manage tasks"}
-	cmd.AddCommand(s.addCommand(), s.listCommand(), s.showCommand())
+	cmd.AddCommand(s.addCommand(), s.listCommand(), s.showCommand(), s.editCommand(), s.readyCommand(), s.doneCommand(), s.cancelCommand())
 	return cmd
+}
+
+func taskID(value string) (int64, error) {
+	id, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || id < 1 {
+		return 0, &commandError{2, "invalid_input", "task ID must be a positive integer"}
+	}
+	return id, nil
+}
+
+func (s *state) editCommand() *cobra.Command {
+	var title, description, priority string
+	cmd := &cobra.Command{Use: "edit ID", Short: "Edit a task", Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		id, err := taskID(args[0])
+		if err != nil {
+			return err
+		}
+		var in app.EditTaskInput
+		if cmd.Flags().Changed("title") {
+			in.Title = &title
+		}
+		if cmd.Flags().Changed("description") {
+			in.Description = &description
+		}
+		if cmd.Flags().Changed("priority") {
+			p, parseErr := domain.ParsePriority(priority)
+			if parseErr != nil {
+				return &commandError{2, "invalid_input", "priority must be low, normal, high, or urgent"}
+			}
+			in.Priority = &p
+		}
+		service, closeFn, err := s.service()
+		if err != nil {
+			return err
+		}
+		defer closeFn()
+		t, err := service.EditTask(cmd.Context(), id, in)
+		if err != nil {
+			return err
+		}
+		return s.writeTaskMutation("Edited", t)
+	}}
+	cmd.Flags().StringVar(&title, "title", "", "task title")
+	cmd.Flags().StringVar(&description, "description", "", "task description")
+	cmd.Flags().StringVar(&priority, "priority", "", "task priority")
+	return cmd
+}
+
+func (s *state) readyCommand() *cobra.Command {
+	return s.transitionCommand("ready", "Mark a task ready", "Ready", func(ctx context.Context, service *app.Service, id int64) (domain.Task, error) {
+		return service.MarkReady(ctx, id)
+	})
+}
+func (s *state) doneCommand() *cobra.Command {
+	return s.transitionCommand("done", "Complete a task", "Completed", func(ctx context.Context, service *app.Service, id int64) (domain.Task, error) {
+		return service.CompleteTask(ctx, id)
+	})
+}
+
+func (s *state) cancelCommand() *cobra.Command {
+	var reason string
+	cmd := &cobra.Command{Use: "cancel ID", Short: "Cancel a task", Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		id, err := taskID(args[0])
+		if err != nil {
+			return err
+		}
+		service, closeFn, err := s.service()
+		if err != nil {
+			return err
+		}
+		defer closeFn()
+		t, err := service.CancelTask(cmd.Context(), id, reason)
+		if err != nil {
+			return err
+		}
+		return s.writeTaskMutation("Cancelled", t)
+	}}
+	cmd.Flags().StringVar(&reason, "reason", "", "cancellation reason")
+	return cmd
+}
+
+func (s *state) transitionCommand(use, short, verb string, run func(context.Context, *app.Service, int64) (domain.Task, error)) *cobra.Command {
+	return &cobra.Command{Use: use + " ID", Short: short, Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		id, err := taskID(args[0])
+		if err != nil {
+			return err
+		}
+		service, closeFn, err := s.service()
+		if err != nil {
+			return err
+		}
+		defer closeFn()
+		t, err := run(cmd.Context(), service, id)
+		if err != nil {
+			return err
+		}
+		return s.writeTaskMutation(verb, t)
+	}}
+}
+
+func (s *state) writeTaskMutation(verb string, t domain.Task) error {
+	if s.json {
+		return writeJSON(s.out, map[string]any{"task": toTaskDTO(t)}, nil)
+	}
+	_, err := fmt.Fprintf(s.out, "%s task #%d: %s\n", verb, t.ID, t.Title)
+	return err
 }
 
 func (s *state) addCommand() *cobra.Command {

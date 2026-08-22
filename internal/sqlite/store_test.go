@@ -2,8 +2,12 @@ package sqlite
 
 import (
 	"context"
+	"crypto/sha256"
+	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -31,7 +35,7 @@ func TestMigrationAndReopen(t *testing.T) {
 	if err = s.db.QueryRow("SELECT MAX(version) FROM schema_migrations").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 1 {
+	if version != 2 {
 		t.Fatalf("version=%d", version)
 	}
 	if err = s.Close(); err != nil {
@@ -55,6 +59,105 @@ func TestMigrationAndReopen(t *testing.T) {
 	}
 	if fk != 1 {
 		t.Fatalf("foreign_keys=%d", fk)
+	}
+}
+
+func TestMigration002FromExistingDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v1.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := migrationFiles.ReadFile("migrations/001_initial.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(string(body)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	checksum := fmt.Sprintf("%x", sha256.Sum256(body))
+	if _, err = db.Exec(`INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(1,?,?)`, checksum, formatTime(time.Now().UTC())); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var version int
+	if err = s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 2 {
+		t.Fatalf("version=%d err=%v", version, err)
+	}
+	if _, err = s.db.Exec(`INSERT INTO events(kind,actor_kind,payload_json,created_at) VALUES('probe','human','{}',?)`, formatTime(time.Now().UTC())); err != nil {
+		t.Fatalf("events table unavailable: %v", err)
+	}
+}
+
+func TestMutationsAreVersionedAndAudited(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	task, err := s.CreateTask(ctx, domain.Task{UID: "audit", Title: "Old", Lifecycle: domain.LifecycleBacklog, Priority: domain.PriorityNormal, CreatedAt: now, UpdatedAt: now, Version: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.Title, task.Priority, task.Version, task.UpdatedAt = "New", domain.PriorityHigh, 2, now.Add(time.Second)
+	task, err = s.EditTask(ctx, task, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := task
+	stale.Version = 3
+	if _, err = s.EditTask(ctx, stale, 1); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("stale err=%v", err)
+	}
+	task.Lifecycle, task.Version, task.UpdatedAt = domain.LifecycleReady, 3, now.Add(2*time.Second)
+	task, err = s.TransitionTask(ctx, task, 2, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelled := now.Add(3 * time.Second)
+	task.Lifecycle, task.CancelledAt, task.Version, task.UpdatedAt = domain.LifecycleCancelled, &cancelled, 4, cancelled
+	if _, err = s.TransitionTask(ctx, task, 3, "superseded"); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err = s.db.QueryRow(`SELECT COUNT(*) FROM events WHERE task_id=?`, task.ID).Scan(&count); err != nil || count != 4 {
+		t.Fatalf("events=%d err=%v", count, err)
+	}
+	var payload string
+	if err = s.db.QueryRow(`SELECT payload_json FROM events WHERE task_id=? AND kind='task_cancelled'`, task.ID).Scan(&payload); err != nil || !strings.Contains(payload, "superseded") {
+		t.Fatalf("payload=%q err=%v", payload, err)
+	}
+}
+
+func TestMutationRollsBackWhenAuditInsertFails(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	task, err := s.CreateTask(ctx, domain.Task{UID: "rollback", Title: "Before", Lifecycle: domain.LifecycleBacklog, Priority: domain.PriorityNormal, CreatedAt: now, UpdatedAt: now, Version: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.db.Exec(`CREATE TRIGGER reject_audit BEFORE INSERT ON events WHEN NEW.kind='task_edited' BEGIN SELECT RAISE(ABORT, 'reject audit'); END`); err != nil {
+		t.Fatal(err)
+	}
+	task.Title, task.Version, task.UpdatedAt = "After", 2, now.Add(time.Second)
+	if _, err = s.EditTask(ctx, task, 1); err == nil {
+		t.Fatal("expected audit failure")
+	}
+	stored, err := s.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Title != "Before" || stored.Version != 1 {
+		t.Fatalf("partial mutation persisted: %+v", stored)
 	}
 }
 
