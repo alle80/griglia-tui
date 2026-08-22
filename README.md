@@ -1,11 +1,11 @@
 # Griglia TUI
 
-Griglia TUI is a local, terminal-first todo list. Milestone 1 provides the
-non-interactive project and task commands; the TUI arrives in a later milestone.
+Griglia TUI is a local, terminal-first todo list with both an interactive,
+keyboard-first interface and deterministic non-interactive commands.
 
 ## Build and use
 
-Go 1.24 or newer is required.
+Go 1.25 or newer is required.
 
 ```bash
 go build -o griglia ./cmd/griglia
@@ -13,7 +13,11 @@ go build -o griglia ./cmd/griglia
 ./griglia task add "First task"
 ./griglia task list
 ./griglia task show 1
+./griglia
 ```
+
+In the TUI, use `j`/`k` or the arrow keys to move, `enter` for task detail,
+`n` to create a task, `?` for help, and `Q` to quit.
 
 Griglia stores local state in `.griglia/griglia.db` and discovers it by walking
 upward from the current directory. Use `--project PATH` or `GRIGLIA_PROJECT` to

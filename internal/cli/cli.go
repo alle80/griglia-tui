@@ -14,6 +14,7 @@ import (
 	"github.com/alle80/griglia-tui/internal/app"
 	"github.com/alle80/griglia-tui/internal/domain"
 	grsqlite "github.com/alle80/griglia-tui/internal/sqlite"
+	"github.com/alle80/griglia-tui/internal/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -83,7 +84,17 @@ func exactArgs(count int) cobra.PositionalArgs {
 func noArgs(cmd *cobra.Command, args []string) error { return exactArgs(0)(cmd, args) }
 
 func (s *state) root() *cobra.Command {
-	root := &cobra.Command{Use: "griglia", Short: "A local, transactional todo list", SilenceErrors: true, SilenceUsage: true}
+	root := &cobra.Command{Use: "griglia", Short: "A local, transactional todo list", Args: noArgs, SilenceErrors: true, SilenceUsage: true, RunE: func(cmd *cobra.Command, _ []string) error {
+		if s.json {
+			return &commandError{2, "invalid_input", "--json requires a non-interactive command"}
+		}
+		service, closeFn, err := s.service()
+		if err != nil {
+			return err
+		}
+		defer closeFn()
+		return tui.Run(cmd.Context(), service)
+	}}
 	root.SetOut(s.out)
 	root.SetErr(s.errOut)
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
