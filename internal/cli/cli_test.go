@@ -157,3 +157,10 @@ func TestUsageErrorsAreInvalidInput(t *testing.T) {
 		})
 	}
 }
+
+func TestTUIRequiresInitializedProject(t *testing.T) {
+	code, out, stderr := run(t, t.TempDir())
+	if code != 3 || out != "" || !strings.Contains(stderr, "no .griglia/griglia.db found") {
+		t.Fatalf("code=%d out=%q stderr=%q", code, out, stderr)
+	}
+}
