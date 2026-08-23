@@ -70,7 +70,12 @@ func (m Model) listView() string {
 			lines = append(lines, m.taskRow(m.tasks[i], i == m.selected)...)
 		}
 		if m.width >= 60 && m.width < 100 {
-			lines = append(lines, "", m.preview(m.tasks[m.selected]))
+			lines = append(lines, "")
+			// Clip each preview line: unbounded lines would wrap in the
+			// terminal and push the footer past the height budget.
+			for _, line := range strings.Split(m.preview(m.tasks[m.selected]), "\n") {
+				lines = append(lines, truncate(line, max(16, m.width-1)))
+			}
 		}
 		if m.width >= 100 {
 			list := strings.Join(lines[2:], "\n")
@@ -119,8 +124,11 @@ func (m Model) taskRow(task domain.TaskView, selected bool) []string {
 		}
 		return []string{first, mutedStyle.Render(second)}
 	}
-	left := truncate(fmt.Sprintf("%s#%-4d %s", marker, task.ID, task.Title), max(16, m.width-36))
-	row := fmt.Sprintf("%-*s  %-19s %s", max(16, m.width-36), left, state, priority)
+	// Pad by display cells, not runes: fmt's %-*s would misalign and
+	// overflow the row when the title contains wide characters.
+	target := max(16, m.width-36)
+	left := truncate(fmt.Sprintf("%s#%-4d %s", marker, task.ID, task.Title), target)
+	row := left + strings.Repeat(" ", max(0, target-lipgloss.Width(left))) + fmt.Sprintf("  %-19s %s", state, priority)
 	if selected {
 		row = selectedStyle.Render(row)
 	}
