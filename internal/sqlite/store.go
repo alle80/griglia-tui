@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/alle80/griglia-tui/internal/domain"
-	_ "modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite"
 )
 
 //go:embed migrations/*.sql
@@ -43,6 +43,18 @@ func Open(path string) (*Store, error) {
 }
 
 func (s *Store) Close() error { return s.db.Close() }
+
+// IsBusy reports whether err is SQLITE_BUSY or SQLITE_LOCKED (including
+// their extended codes), i.e. transient write contention that survived the
+// configured busy_timeout and is worth retrying rather than an internal bug.
+func IsBusy(err error) bool {
+	var se *sqlite3.Error
+	if !errors.As(err, &se) {
+		return false
+	}
+	primary := se.Code() & 0xff
+	return primary == 5 || primary == 6 // SQLITE_BUSY, SQLITE_LOCKED
+}
 
 func (s *Store) CreateProject(ctx context.Context, project domain.Project) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO projects(id,name,created_at) VALUES(?,?,?)`, project.ID, project.Name, formatTime(project.CreatedAt))
@@ -123,7 +135,7 @@ func (s *Store) CreateTask(ctx context.Context, t domain.Task) (domain.Task, err
 		return domain.Task{}, err
 	}
 	defer tx.Rollback()
-	r, err := tx.ExecContext(ctx, `INSERT INTO tasks(uid,title,description,lifecycle,priority,progress,phase,completion_summary,created_at,updated_at,version) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, t.UID, t.Title, t.Description, t.Lifecycle, t.Priority, t.Progress, t.Phase, t.CompletionSummary, formatTime(t.CreatedAt), formatTime(t.UpdatedAt), t.Version)
+	r, err := tx.ExecContext(ctx, `INSERT INTO tasks(uid,title,description,lifecycle,priority,progress,phase,completion_summary,created_at,updated_at,completed_at,cancelled_at,version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, t.UID, t.Title, t.Description, t.Lifecycle, t.Priority, t.Progress, t.Phase, t.CompletionSummary, formatTime(t.CreatedAt), formatTime(t.UpdatedAt), nullableTime(t.CompletedAt), nullableTime(t.CancelledAt), t.Version)
 	if err != nil {
 		return domain.Task{}, err
 	}

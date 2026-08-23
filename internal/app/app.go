@@ -126,6 +126,14 @@ func (s *Service) AddTask(ctx context.Context, in AddTaskInput) (domain.Task, er
 		return domain.Task{}, fmt.Errorf("generate task UUID: %w", err)
 	}
 	t := domain.Task{UID: uid, Title: in.Title, Description: in.Description, Priority: in.Priority, Lifecycle: in.Lifecycle, CreatedAt: now, UpdatedAt: now, Version: 1}
+	// A task born in a terminal lifecycle must carry the same invariants that
+	// a transition into that lifecycle establishes.
+	switch in.Lifecycle {
+	case domain.LifecycleDone:
+		t.Progress, t.CompletedAt = 100, &now
+	case domain.LifecycleCancelled:
+		t.CancelledAt = &now
+	}
 	return s.tasks.CreateTask(ctx, t)
 }
 

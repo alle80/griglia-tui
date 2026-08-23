@@ -23,6 +23,8 @@ const protocolVersion = "1"
 
 type Options struct {
 	Version    string
+	Commit     string
+	BuildDate  string
 	WorkingDir string
 }
 type state struct {
@@ -45,7 +47,11 @@ func Run(args []string, stdout, stderr io.Writer, opts Options) int {
 	root.SetArgs(args)
 	// Find does not parse flags. Capture the presentation mode before command
 	// resolution so an unknown command still receives the requested envelope.
+	// Arguments after "--" are positional and must not toggle the mode.
 	for _, arg := range args {
+		if arg == "--" {
+			break
+		}
 		if arg == "--json" || arg == "--json=true" {
 			s.json = true
 		} else if arg == "--json=false" {
@@ -59,6 +65,11 @@ func Run(args []string, stdout, stderr io.Writer, opts Options) int {
 	}
 	if err := root.Execute(); err != nil {
 		ce := mapError(err)
+		if s.json && ce.kind == "internal_error" {
+			// The JSON envelope carries a stable message; keep the real
+			// failure visible on stderr, which is reserved for diagnostics.
+			fmt.Fprintln(s.errOut, "Error:", err)
+		}
 		s.writeError(ce)
 		return ce.code
 	}
@@ -108,11 +119,18 @@ func (s *state) root() *cobra.Command {
 }
 
 func (s *state) versionCommand() *cobra.Command {
-	return &cobra.Command{Use: "version", Short: "Print the version", Args: noArgs, RunE: func(*cobra.Command, []string) error {
-		if s.json {
-			return writeJSON(s.out, map[string]any{"version": s.opts.Version}, nil)
+	return &cobra.Command{Use: "version", Short: "Print version, commit, and build date", Args: noArgs, RunE: func(*cobra.Command, []string) error {
+		commit, date := s.opts.Commit, s.opts.BuildDate
+		if commit == "" {
+			commit = "unknown"
 		}
-		_, err := fmt.Fprintln(s.out, "griglia", s.opts.Version)
+		if date == "" {
+			date = "unknown"
+		}
+		if s.json {
+			return writeJSON(s.out, map[string]any{"version": s.opts.Version, "commit": commit, "build_date": date}, nil)
+		}
+		_, err := fmt.Fprintf(s.out, "griglia %s (commit %s, built %s)\n", s.opts.Version, commit, date)
 		return err
 	}}
 }
@@ -173,7 +191,17 @@ func (s *state) initCommand() *cobra.Command {
 }
 
 func (s *state) taskCommand() *cobra.Command {
-	cmd := &cobra.Command{Use: "task", Short: "Manage tasks"}
+	// Without RunE, cobra treats an unknown subcommand as a request for help
+	// on stdout with exit 0, which would corrupt the JSON protocol stream.
+	cmd := &cobra.Command{Use: "task", Short: "Manage tasks", RunE: func(cmd *cobra.Command, args []string) error {
+		if len(args) > 0 {
+			return &commandError{2, "invalid_input", fmt.Sprintf("unknown command %q for %q", args[0], cmd.CommandPath())}
+		}
+		if s.json {
+			return &commandError{2, "invalid_input", "task requires a subcommand"}
+		}
+		return cmd.Help()
+	}}
 	cmd.AddCommand(s.addCommand(), s.listCommand(), s.showCommand(), s.editCommand(), s.readyCommand(), s.doneCommand(), s.cancelCommand(), s.claimCommand(), s.claimNextCommand(), s.releaseCommand(), s.progressCommand(), s.askCommand(), s.answerCommand(), s.questionsCommand(), s.acknowledgeCommand(), s.dependCommand(), s.undependCommand(), s.dependenciesCommand())
 	return cmd
 }
@@ -908,6 +936,9 @@ func mapError(err error) *commandError {
 	}
 	if errors.Is(err, domain.ErrNoEligible) {
 		return &commandError{4, "no_eligible_task", "no eligible task"}
+	}
+	if grsqlite.IsBusy(err) {
+		return &commandError{6, "busy", "database is temporarily busy"}
 	}
 	return &commandError{1, "internal_error", "internal error"}
 }
