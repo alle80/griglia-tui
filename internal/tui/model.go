@@ -120,6 +120,7 @@ type Model struct {
 	dependenciesFrom   route
 	dependenciesLoad   bool
 	refreshing         bool
+	detailScroll       int
 	tick               func() tea.Cmd
 }
 

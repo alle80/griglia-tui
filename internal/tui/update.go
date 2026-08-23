@@ -183,8 +183,21 @@ func (m Model) updateRoute(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case routeList:
 		return m.updateList(msg)
 	case routeDetail:
-		if matches(msg, keys.Back) {
+		switch {
+		case matches(msg, keys.Back):
 			m.route = routeList
+			return m, nil
+		case matches(msg, keys.Down):
+			m.scrollDetailBy(1)
+			return m, nil
+		case matches(msg, keys.Up):
+			m.scrollDetailBy(-1)
+			return m, nil
+		case matches(msg, keys.PageDown):
+			m.scrollDetailBy(m.detailViewportHeight())
+			return m, nil
+		case matches(msg, keys.PageUp):
+			m.scrollDetailBy(-m.detailViewportHeight())
 			return m, nil
 		}
 		return m.updateTaskAction(msg)
@@ -279,7 +292,7 @@ func (m Model) updateList(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.selectedID = m.tasks[m.selected].ID
 	case matches(msg, keys.Open) && len(m.tasks) > 0:
-		m.route = routeDetail
+		m.route, m.detailScroll = routeDetail, 0
 		m.dependenciesTaskID, m.dependencies, m.dependenciesLoad = m.tasks[m.selected].ID, nil, true
 		return m, m.loadDependencies(m.dependenciesTaskID)
 	case matches(msg, keys.New):
@@ -421,6 +434,15 @@ func (m Model) updateForm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.form.err = nil
 	}
 	return m, cmd
+}
+
+// scrollDetailBy moves the detail scroll offset, first re-clamping the stored
+// offset to the current content bounds so a shrink since the last keypress
+// (refresh, resize) never leaves keys pushing against a stale out-of-range
+// position.
+func (m *Model) scrollDetailBy(delta int) {
+	limit := m.detailMaxScroll()
+	m.detailScroll = max(0, min(min(m.detailScroll, limit)+delta, limit))
 }
 
 func (f *formModel) moveFocus(delta int) {

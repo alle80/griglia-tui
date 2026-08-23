@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/alle80/griglia-tui/internal/domain"
 )
@@ -151,16 +152,26 @@ func (m Model) preview(task domain.TaskView) string {
 	return fmt.Sprintf("#%d — %s\n%s · %s · %d%%%s%s\n%s", task.ID, task.Title, state, task.Priority, task.Progress, owner, phase, empty(task.Description))
 }
 
-func (m Model) detailView() string {
-	if len(m.tasks) == 0 {
-		return "No selected task.\n\nq back · Q quit"
-	}
-	task := m.tasks[m.selected]
+// wrapLines wraps text to the given display width — Unicode- and
+// wide-character-aware — preserving explicit line breaks and blank lines.
+func wrapLines(text string, width int) []string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	return strings.Split(ansi.Wrap(text, width, ""), "\n")
+}
+
+// detailWrapWidth is the display width detail text wraps to.
+func (m Model) detailWrapWidth() int { return max(1, m.width-2) }
+
+// detailLines is the scrollable body of the detail view: everything between
+// the pinned heading and the pinned error/footer, with free-form text wrapped
+// to the terminal width. Nothing is ever truncated here; content beyond the
+// viewport is reachable by scrolling.
+func (m Model) detailLines(task domain.TaskView) []string {
 	state := "—"
 	if task.OperationalState != nil {
 		state = string(*task.OperationalState)
 	}
-	lines := []string{titleStyle.Render(fmt.Sprintf("TASK #%d", task.ID)), "", task.Title, "", "Lifecycle: " + string(task.Lifecycle), "Operational state: " + state, "Priority: " + string(task.Priority), fmt.Sprintf("Progress: %d%%", task.Progress)}
+	lines := []string{"", task.Title, "", "Lifecycle: " + string(task.Lifecycle), "Operational state: " + state, "Priority: " + string(task.Priority), fmt.Sprintf("Progress: %d%%", task.Progress)}
 	if task.OperationalState != nil && *task.OperationalState == domain.OperationalWaitingForHuman {
 		lines = append(lines, "!! Waiting for human input — press w to view and answer questions")
 	}
@@ -183,10 +194,89 @@ func (m Model) detailView() string {
 	if task.CompletionSummary != "" {
 		lines = append(lines, "", "Completion summary", task.CompletionSummary)
 	}
-	if m.actionErr != nil {
-		lines = append(lines, "", errorStyle.Render(m.actionErr.Error()))
+	// Wrapping the joined body wraps every row uniformly, so no line —
+	// description, title, metadata, or dependency row — can overflow.
+	return wrapLines(strings.Join(lines, "\n"), m.detailWrapWidth())
+}
+
+// detailHint is the pinned footer, wrapped to the terminal width.
+func (m Model) detailHint(scrollable bool) []string {
+	hint := "e edit · a ready · d done · x cancel · w questions · b dependencies · q back · ? help"
+	if scrollable {
+		hint = "j/k scroll · " + hint
 	}
-	lines = append(lines, "", mutedStyle.Render("e edit · a ready · d done · x cancel · w questions · b dependencies · q back · ? help"))
+	return wrapLines(hint, m.detailWrapWidth())
+}
+
+// detailErrorRows counts the pinned error block: a separator plus the wrapped
+// error text, zero when no error is showing.
+func (m Model) detailErrorRows() int {
+	if m.actionErr == nil {
+		return 0
+	}
+	return 1 + len(wrapLines(m.actionErr.Error(), m.detailWrapWidth()))
+}
+
+// detailViewportFor sizes the scrollable window for a body of contentLen
+// rows: terminal height minus the pinned heading, error block, and footer.
+// The footer grows a "j/k scroll" prefix when content overflows, which can
+// only shrink the viewport further, so the second pass is final.
+func (m Model) detailViewportFor(contentLen int) int {
+	base := m.height - 2 - m.detailErrorRows()
+	height := max(1, base-len(m.detailHint(false)))
+	if contentLen > height {
+		height = max(1, base-len(m.detailHint(true)))
+	}
+	return height
+}
+
+func (m Model) detailViewportHeight() int {
+	if len(m.tasks) == 0 {
+		return 1
+	}
+	return m.detailViewportFor(len(m.detailLines(m.tasks[m.selected])))
+}
+
+func (m Model) detailMaxScroll() int {
+	if len(m.tasks) == 0 {
+		return 0
+	}
+	return max(0, len(m.detailLines(m.tasks[m.selected]))-m.detailViewportHeight())
+}
+
+func (m Model) detailView() string {
+	if len(m.tasks) == 0 {
+		return "No selected task.\n\nq back · Q quit"
+	}
+	task := m.tasks[m.selected]
+	content := m.detailLines(task)
+	height := m.detailViewportFor(len(content))
+	scrollable := len(content) > height
+	// The scroll offset survives refreshes and resizes and is only clamped
+	// here: when content shrinks or the window grows, the position moves up
+	// just enough to stay within bounds instead of resetting to the top.
+	scroll := min(m.detailScroll, max(0, len(content)-height))
+	end := min(len(content), scroll+height)
+	heading := titleStyle.Render(fmt.Sprintf("TASK #%d", task.ID))
+	if scrollable {
+		position := fmt.Sprintf("%d-%d/%d", scroll+1, end, len(content))
+		space := m.width - lipgloss.Width(heading) - lipgloss.Width(position) - 2
+		if space < 1 {
+			space = 1
+		}
+		heading += strings.Repeat(" ", space) + mutedStyle.Render(position)
+	}
+	lines := append([]string{heading}, content[scroll:end]...)
+	if m.actionErr != nil {
+		lines = append(lines, "")
+		for _, line := range wrapLines(m.actionErr.Error(), m.detailWrapWidth()) {
+			lines = append(lines, errorStyle.Render(line))
+		}
+	}
+	lines = append(lines, "")
+	for _, line := range m.detailHint(scrollable) {
+		lines = append(lines, mutedStyle.Render(line))
+	}
 	return strings.Join(lines, "\n")
 }
 
@@ -229,7 +319,7 @@ func (m Model) dependenciesView() string {
 }
 
 func (m Model) helpView() string {
-	return strings.Join([]string{titleStyle.Render("HELP"), "", "j / ↓       select next task", "k / ↑       select previous task", "enter       open task detail", "n           create a task", "e           edit selected task", "a           mark backlog task ready", "d           complete ready task", "x           cancel backlog/ready task", "w           view and answer task questions", "b           inspect and edit task dependencies", "r           reload tasks", "?           open or close help", "q / esc     return to the list", "Q / ctrl+c  quit", "", mutedStyle.Render("Lifecycle actions are validated; errors are recoverable.")}, "\n")
+	return strings.Join([]string{titleStyle.Render("HELP"), "", "j / ↓       select next task", "k / ↑       select previous task", "enter       open task detail", "            (in detail j/k scroll, pgup/pgdn page)", "n           create a task", "e           edit selected task", "a           mark backlog task ready", "d           complete ready task", "x           cancel backlog/ready task", "w           view and answer task questions", "b           inspect and edit task dependencies", "r           reload tasks", "?           open or close help", "q / esc     return to the list", "Q / ctrl+c  quit", "", mutedStyle.Render("Lifecycle actions are validated; errors are recoverable.")}, "\n")
 }
 
 func questionKind(blocking bool) string {
