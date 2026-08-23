@@ -430,7 +430,7 @@ func (m Model) formView() string {
 	if m.form.saving {
 		lines = append(lines, "Saving…", "")
 	}
-	lines = append(lines, mutedStyle.Render("tab/shift+tab field · enter newline in description, save from priority · esc cancel · Ctrl-C quit"))
+	lines = append(lines, mutedStyle.Render("tab/shift+tab field · enter newline/save · esc cancel · Ctrl-C quit"))
 	return strings.Join(lines, "\n")
 }
 
