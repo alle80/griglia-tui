@@ -127,7 +127,7 @@ func (m Model) updateTaskAction(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	task := m.tasks[m.selected]
 	switch {
 	case matches(msg, keys.Edit):
-		m.form = newEditForm(task)
+		m.form = newEditForm(task.Task)
 		m.sizeForm()
 		m.route = routeForm
 	case matches(msg, keys.Ready):
@@ -135,7 +135,7 @@ func (m Model) updateTaskAction(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case matches(msg, keys.Done):
 		return m, m.mutateTask("Completed", task.ID)
 	case matches(msg, keys.Cancel):
-		m.form = newCancelForm(task)
+		m.form = newCancelForm(task.Task)
 		m.sizeForm()
 		m.route = routeForm
 	}

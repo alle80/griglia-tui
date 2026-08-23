@@ -174,7 +174,7 @@ func (s *state) initCommand() *cobra.Command {
 
 func (s *state) taskCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "task", Short: "Manage tasks"}
-	cmd.AddCommand(s.addCommand(), s.listCommand(), s.showCommand(), s.editCommand(), s.readyCommand(), s.doneCommand(), s.cancelCommand())
+	cmd.AddCommand(s.addCommand(), s.listCommand(), s.showCommand(), s.editCommand(), s.readyCommand(), s.doneCommand(), s.cancelCommand(), s.claimCommand(), s.claimNextCommand(), s.releaseCommand(), s.progressCommand())
 	return cmd
 }
 
@@ -230,9 +230,129 @@ func (s *state) readyCommand() *cobra.Command {
 	})
 }
 func (s *state) doneCommand() *cobra.Command {
-	return s.transitionCommand("done", "Complete a task", "Completed", func(ctx context.Context, service *app.Service, id int64) (domain.Task, error) {
-		return service.CompleteTask(ctx, id)
-	})
+	var agent, instance, comment string
+	cmd := &cobra.Command{Use: "done ID", Short: "Complete a task", Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		id, err := taskID(args[0])
+		if err != nil {
+			return err
+		}
+		service, closeFn, err := s.service()
+		if err != nil {
+			return err
+		}
+		defer closeFn()
+		if agent != "" || instance != "" || comment != "" {
+			view, completeErr := service.CompleteClaimedTask(cmd.Context(), id, comment, domain.AgentIdentity{AgentName: agent, InstanceID: instance})
+			if completeErr != nil {
+				return completeErr
+			}
+			return s.writeTaskViewMutation("Completed", view)
+		}
+		t, completeErr := service.CompleteTask(cmd.Context(), id)
+		if completeErr != nil {
+			return completeErr
+		}
+		return s.writeTaskMutation("Completed", t)
+	}}
+	cmd.Flags().StringVar(&agent, "agent", "", "agent name")
+	cmd.Flags().StringVar(&instance, "instance", "", "agent instance ID")
+	cmd.Flags().StringVar(&comment, "comment", "", "completion summary")
+	return cmd
+}
+
+func identityFlags(cmd *cobra.Command, agent, instance *string) {
+	cmd.Flags().StringVar(agent, "agent", "", "agent name")
+	cmd.Flags().StringVar(instance, "instance", "", "agent instance ID")
+}
+
+func (s *state) claimCommand() *cobra.Command {
+	var agent, instance string
+	cmd := &cobra.Command{Use: "claim ID", Short: "Claim a ready task", Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		id, err := taskID(args[0])
+		if err != nil {
+			return err
+		}
+		service, closeFn, err := s.service()
+		if err != nil {
+			return err
+		}
+		defer closeFn()
+		view, err := service.ClaimTask(cmd.Context(), id, domain.AgentIdentity{AgentName: agent, InstanceID: instance})
+		if err != nil {
+			return err
+		}
+		return s.writeTaskViewMutation("Claimed", view)
+	}}
+	identityFlags(cmd, &agent, &instance)
+	return cmd
+}
+
+func (s *state) claimNextCommand() *cobra.Command {
+	var agent, instance string
+	cmd := &cobra.Command{Use: "claim-next", Short: "Claim the next eligible task", Args: noArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		service, closeFn, err := s.service()
+		if err != nil {
+			return err
+		}
+		defer closeFn()
+		view, err := service.ClaimNext(cmd.Context(), domain.AgentIdentity{AgentName: agent, InstanceID: instance})
+		if err != nil {
+			return err
+		}
+		return s.writeTaskViewMutation("Claimed", view)
+	}}
+	identityFlags(cmd, &agent, &instance)
+	return cmd
+}
+
+func (s *state) releaseCommand() *cobra.Command {
+	var agent, instance, reason string
+	cmd := &cobra.Command{Use: "release ID", Short: "Release an owned task", Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		id, err := taskID(args[0])
+		if err != nil {
+			return err
+		}
+		service, closeFn, err := s.service()
+		if err != nil {
+			return err
+		}
+		defer closeFn()
+		view, err := service.ReleaseClaim(cmd.Context(), id, domain.AgentIdentity{AgentName: agent, InstanceID: instance}, reason)
+		if err != nil {
+			return err
+		}
+		return s.writeTaskViewMutation("Released", view)
+	}}
+	identityFlags(cmd, &agent, &instance)
+	cmd.Flags().StringVar(&reason, "reason", "", "release reason")
+	return cmd
+}
+
+func (s *state) progressCommand() *cobra.Command {
+	var agent, instance, message string
+	cmd := &cobra.Command{Use: "progress ID PERCENT", Short: "Update progress on an owned task", Args: exactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
+		id, err := taskID(args[0])
+		if err != nil {
+			return err
+		}
+		percent, err := strconv.Atoi(args[1])
+		if err != nil {
+			return &commandError{2, "invalid_input", "progress must be an integer between 0 and 100"}
+		}
+		service, closeFn, err := s.service()
+		if err != nil {
+			return err
+		}
+		defer closeFn()
+		view, err := service.UpdateProgress(cmd.Context(), id, percent, message, domain.AgentIdentity{AgentName: agent, InstanceID: instance})
+		if err != nil {
+			return err
+		}
+		return s.writeTaskViewMutation("Updated", view)
+	}}
+	identityFlags(cmd, &agent, &instance)
+	cmd.Flags().StringVar(&message, "message", "", "current phase or status")
+	return cmd
 }
 
 func (s *state) cancelCommand() *cobra.Command {
@@ -278,9 +398,18 @@ func (s *state) transitionCommand(use, short, verb string, run func(context.Cont
 
 func (s *state) writeTaskMutation(verb string, t domain.Task) error {
 	if s.json {
-		return writeJSON(s.out, map[string]any{"task": toTaskDTO(t)}, nil)
+		return writeJSON(s.out, map[string]any{"task": toTaskDTO(domain.NewTaskView(t, nil))}, nil)
 	}
 	_, err := fmt.Fprintf(s.out, "%s task #%d: %s\n", verb, t.ID, t.Title)
+	return err
+}
+
+func (s *state) writeTaskViewMutation(verb string, view domain.TaskView) error {
+	if s.json {
+		dto := toTaskDTO(view)
+		return writeJSON(s.out, map[string]any{"task": dto, "claim": dto.ActiveClaim}, nil)
+	}
+	_, err := fmt.Fprintf(s.out, "%s task #%d: %s\n", verb, view.ID, view.Title)
 	return err
 }
 
@@ -305,7 +434,7 @@ func (s *state) addCommand() *cobra.Command {
 			return err
 		}
 		if s.json {
-			return writeJSON(s.out, map[string]any{"task": toTaskDTO(t)}, nil)
+			return writeJSON(s.out, map[string]any{"task": toTaskDTO(domain.NewTaskView(t, nil))}, nil)
 		}
 		_, err = fmt.Fprintf(s.out, "Added task #%d: %s\n", t.ID, t.Title)
 		return err
@@ -418,10 +547,25 @@ type taskDTO struct {
 	CompletedAt       *string          `json:"completed_at"`
 	CancelledAt       *string          `json:"cancelled_at"`
 	Version           int64            `json:"version"`
+	ActiveClaim       *claimDTO        `json:"active_claim"`
 }
 
-func toTaskDTO(t domain.Task) taskDTO {
+type claimDTO struct {
+	AgentName  string `json:"agent_name"`
+	InstanceID string `json:"instance_id"`
+	ClaimedAt  string `json:"claimed_at"`
+}
+
+func toTaskDTO(view domain.TaskView) taskDTO {
+	t := view.Task
 	d := taskDTO{ID: t.ID, UID: t.UID, Title: t.Title, Description: t.Description, Lifecycle: t.Lifecycle, Priority: t.Priority, Progress: t.Progress, Phase: t.Phase, CompletionSummary: t.CompletionSummary, CreatedAt: formatJSONTime(t.CreatedAt), UpdatedAt: formatJSONTime(t.UpdatedAt), Version: t.Version}
+	if view.OperationalState != nil {
+		value := string(*view.OperationalState)
+		d.OperationalState = &value
+	}
+	if view.ActiveClaim != nil {
+		d.ActiveClaim = &claimDTO{AgentName: view.ActiveClaim.AgentName, InstanceID: view.ActiveClaim.InstanceID, ClaimedAt: formatJSONTime(view.ActiveClaim.ClaimedAt)}
+	}
 	if t.CompletedAt != nil {
 		v := formatJSONTime(*t.CompletedAt)
 		d.CompletedAt = &v
@@ -459,6 +603,9 @@ func mapError(err error) *commandError {
 	}
 	if errors.Is(err, domain.ErrConflict) {
 		return &commandError{5, "conflict", err.Error()}
+	}
+	if errors.Is(err, domain.ErrNoEligible) {
+		return &commandError{4, "no_eligible_task", "no eligible task"}
 	}
 	return &commandError{1, "internal_error", "internal error"}
 }

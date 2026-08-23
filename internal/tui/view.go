@@ -97,12 +97,15 @@ func (m Model) visibleRange() (int, int) {
 	return start, end
 }
 
-func (m Model) taskRow(task domain.Task, selected bool) []string {
+func (m Model) taskRow(task domain.TaskView, selected bool) []string {
 	marker := "  "
 	if selected {
 		marker = "> "
 	}
 	state := fmt.Sprintf("[%s]", task.Lifecycle)
+	if task.OperationalState != nil {
+		state = fmt.Sprintf("[%s]", *task.OperationalState)
+	}
 	priority := strings.ToUpper(string(task.Priority))
 	if m.width < 60 {
 		first := truncate(fmt.Sprintf("%s#%d %s", marker, task.ID, task.Title), max(12, m.width-1))
@@ -120,8 +123,20 @@ func (m Model) taskRow(task domain.Task, selected bool) []string {
 	return []string{row}
 }
 
-func (m Model) preview(task domain.Task) string {
-	return fmt.Sprintf("#%d — %s\n%s · %s · %d%%\n%s", task.ID, task.Title, task.Lifecycle, task.Priority, task.Progress, empty(task.Description))
+func (m Model) preview(task domain.TaskView) string {
+	state := string(task.Lifecycle)
+	if task.OperationalState != nil {
+		state = string(*task.OperationalState)
+	}
+	owner := ""
+	if task.ActiveClaim != nil {
+		owner = fmt.Sprintf("\n%s · %s", task.ActiveClaim.AgentName, task.ActiveClaim.InstanceID)
+	}
+	phase := ""
+	if task.Phase != "" {
+		phase = "\n" + task.Phase
+	}
+	return fmt.Sprintf("#%d — %s\n%s · %s · %d%%%s%s\n%s", task.ID, task.Title, state, task.Priority, task.Progress, owner, phase, empty(task.Description))
 }
 
 func (m Model) detailView() string {
@@ -129,7 +144,14 @@ func (m Model) detailView() string {
 		return "No selected task.\n\nq back · Q quit"
 	}
 	task := m.tasks[m.selected]
-	lines := []string{titleStyle.Render(fmt.Sprintf("TASK #%d", task.ID)), "", task.Title, "", "Lifecycle: " + string(task.Lifecycle), "Priority: " + string(task.Priority), fmt.Sprintf("Progress: %d%%", task.Progress)}
+	state := "—"
+	if task.OperationalState != nil {
+		state = string(*task.OperationalState)
+	}
+	lines := []string{titleStyle.Render(fmt.Sprintf("TASK #%d", task.ID)), "", task.Title, "", "Lifecycle: " + string(task.Lifecycle), "Operational state: " + state, "Priority: " + string(task.Priority), fmt.Sprintf("Progress: %d%%", task.Progress)}
+	if task.ActiveClaim != nil {
+		lines = append(lines, "Agent: "+task.ActiveClaim.AgentName, "Instance: "+task.ActiveClaim.InstanceID)
+	}
 	if task.Phase != "" {
 		lines = append(lines, "Phase: "+task.Phase)
 	}

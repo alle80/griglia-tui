@@ -120,6 +120,71 @@ func TestLifecycleCommandValidation(t *testing.T) {
 	}
 }
 
+func TestAgentCoordinationCLIAndJSON(t *testing.T) {
+	dir := t.TempDir()
+	if code, _, _ := run(t, dir, "init"); code != 0 {
+		t.Fatal(code)
+	}
+	if code, _, _ := run(t, dir, "task", "add", "Agent work", "--lifecycle", "ready", "--priority", "urgent"); code != 0 {
+		t.Fatal(code)
+	}
+	code, out, stderr := run(t, dir, "task", "claim-next", "--agent", "codex", "--instance", "session-a", "--json")
+	if code != 0 || stderr != "" || !strings.Contains(out, `"operational_state":"working"`) || !strings.Contains(out, `"agent_name":"codex"`) {
+		t.Fatalf("claim-next: %d %q %q", code, out, stderr)
+	}
+	code, out, stderr = run(t, dir, "task", "claim", "1", "--agent", "codex", "--instance", "session-a", "--json")
+	if code != 0 || stderr != "" || !strings.Contains(out, `"working"`) {
+		t.Fatalf("repeated claim: %d %q %q", code, out, stderr)
+	}
+	for _, args := range [][]string{
+		{"task", "claim", "1", "--agent", "claude", "--instance", "session-b", "--json"},
+		{"task", "release", "1", "--agent", "claude", "--instance", "session-b", "--json"},
+		{"task", "progress", "1", "40", "--agent", "claude", "--instance", "session-b", "--json"},
+		{"task", "done", "1", "--json"}, {"task", "cancel", "1", "--json"},
+		{"task", "edit", "1", "--title", "unsafe", "--json"},
+	} {
+		code, out, stderr = run(t, dir, args...)
+		if code != 5 || stderr != "" || !strings.Contains(out, `"code":"conflict"`) {
+			t.Fatalf("conflict args=%v code=%d out=%q err=%q", args, code, out, stderr)
+		}
+	}
+	code, out, stderr = run(t, dir, "task", "progress", "1", "40", "--agent", "codex", "--instance", "session-a", "--message", "Implementing", "--json")
+	if code != 0 || stderr != "" || !strings.Contains(out, `"progress":40`) || !strings.Contains(out, `"phase":"Implementing"`) {
+		t.Fatalf("progress: %d %q %q", code, out, stderr)
+	}
+	code, out, stderr = run(t, dir, "task", "done", "1", "--agent", "codex", "--instance", "session-a", "--comment", "Implemented and tested", "--json")
+	if code != 0 || stderr != "" || !strings.Contains(out, `"lifecycle":"done"`) || !strings.Contains(out, `"completion_summary":"Implemented and tested"`) || !strings.Contains(out, `"active_claim":null`) {
+		t.Fatalf("done: %d %q %q", code, out, stderr)
+	}
+	code, out, stderr = run(t, dir, "task", "claim-next", "--agent", "codex", "--instance", "session-a", "--json")
+	if code != 4 || stderr != "" || !strings.Contains(out, `"code":"no_eligible_task"`) {
+		t.Fatalf("no work: %d %q %q", code, out, stderr)
+	}
+}
+
+func TestAgentCommandValidationAndRelease(t *testing.T) {
+	dir := t.TempDir()
+	if code, _, _ := run(t, dir, "init"); code != 0 {
+		t.Fatal(code)
+	}
+	if code, _, _ := run(t, dir, "task", "add", "Release", "--lifecycle", "ready"); code != 0 {
+		t.Fatal(code)
+	}
+	for _, args := range [][]string{{"task", "claim", "1", "--agent", "", "--instance", "x", "--json"}, {"task", "progress", "1", "101", "--agent", "a", "--instance", "x", "--json"}, {"task", "progress", "1", "bad", "--agent", "a", "--instance", "x", "--json"}} {
+		code, out, stderr := run(t, dir, args...)
+		if code != 2 || stderr != "" || !strings.Contains(out, `"code":"invalid_input"`) {
+			t.Fatalf("args=%v code=%d out=%q err=%q", args, code, out, stderr)
+		}
+	}
+	if code, _, _ := run(t, dir, "task", "claim", "1", "--agent", "codex", "--instance", "one"); code != 0 {
+		t.Fatal(code)
+	}
+	code, out, stderr := run(t, dir, "task", "release", "1", "--agent", "codex", "--instance", "one", "--reason", "handoff", "--json")
+	if code != 0 || stderr != "" || !strings.Contains(out, `"operational_state":"available"`) || !strings.Contains(out, `"active_claim":null`) {
+		t.Fatalf("release=%d %q %q", code, out, stderr)
+	}
+}
+
 func TestJSONEnvelopesAndStreams(t *testing.T) {
 	dir := t.TempDir()
 	code, out, stderr := run(t, dir, "--json", "task", "list")
@@ -161,8 +226,8 @@ func TestJSONEnvelopesAndStreams(t *testing.T) {
 		t.Fatal(err)
 	}
 	task := env["data"].(map[string]any)["task"].(map[string]any)
-	if task["operational_state"] != nil {
-		t.Fatalf("ready operational_state=%v, want null", task["operational_state"])
+	if task["operational_state"] != "available" {
+		t.Fatalf("ready operational_state=%v, want available", task["operational_state"])
 	}
 }
 

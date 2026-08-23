@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -15,11 +16,12 @@ import (
 )
 
 type fakeService struct {
-	tasks   []domain.Task
-	listErr error
-	addErr  error
-	added   []app.AddTaskInput
-	nextID  int64
+	tasks     []domain.Task
+	listErr   error
+	addErr    error
+	added     []app.AddTaskInput
+	nextID    int64
+	actionErr error
 }
 
 func (f *fakeService) EditTask(_ context.Context, id int64, in app.EditTaskInput) (domain.Task, error) {
@@ -50,6 +52,9 @@ func (f *fakeService) CancelTask(_ context.Context, id int64, _ string) (domain.
 	return f.setLifecycle(id, domain.LifecycleCancelled)
 }
 func (f *fakeService) setLifecycle(id int64, lifecycle domain.Lifecycle) (domain.Task, error) {
+	if f.actionErr != nil {
+		return domain.Task{}, f.actionErr
+	}
 	for i := range f.tasks {
 		if f.tasks[i].ID == id {
 			f.tasks[i].Lifecycle = lifecycle
@@ -60,8 +65,12 @@ func (f *fakeService) setLifecycle(id int64, lifecycle domain.Lifecycle) (domain
 	return domain.Task{}, domain.ErrNotFound
 }
 
-func (f *fakeService) ListTasks(context.Context) ([]domain.Task, error) {
-	return append([]domain.Task(nil), f.tasks...), f.listErr
+func (f *fakeService) ListTasks(context.Context) ([]domain.TaskView, error) {
+	views := make([]domain.TaskView, 0, len(f.tasks))
+	for _, task := range f.tasks {
+		views = append(views, domain.NewTaskView(task, nil))
+	}
+	return views, f.listErr
 }
 
 func (f *fakeService) AddTask(_ context.Context, input app.AddTaskInput) (domain.Task, error) {
@@ -136,12 +145,13 @@ func TestPopulatedListMovementAndSelectionPreservedByID(t *testing.T) {
 		t.Fatalf("selected ID=%d", model.selectedID)
 	}
 	service.tasks = []domain.Task{service.tasks[1], service.tasks[0]}
-	model, _ = update(t, model, tasksLoadedMsg{tasks: service.tasks})
+	views, _ := service.ListTasks(context.Background())
+	model, _ = update(t, model, tasksLoadedMsg{tasks: views})
 	if model.selected != 0 || model.selectedID != 2 {
 		t.Fatalf("selection index=%d id=%d", model.selected, model.selectedID)
 	}
 	view := model.render()
-	for _, want := range []string{"Ready", "[ready]", "HIGH"} {
+	for _, want := range []string{"Ready", "[available]", "HIGH"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("view missing %q: %q", want, view)
 		}
@@ -242,13 +252,30 @@ type repository struct{}
 func (repository) CreateTask(context.Context, domain.Task) (domain.Task, error) {
 	return domain.Task{}, nil
 }
-func (repository) ListTasks(context.Context) ([]domain.Task, error)    { return nil, nil }
-func (repository) GetTask(context.Context, int64) (domain.Task, error) { return domain.Task{}, nil }
+func (repository) ListTasks(context.Context) ([]domain.TaskView, error) { return nil, nil }
+func (repository) GetTask(context.Context, int64) (domain.TaskView, error) {
+	return domain.TaskView{}, nil
+}
 func (repository) EditTask(context.Context, domain.Task, int64) (domain.Task, error) {
 	return domain.Task{}, nil
 }
 func (repository) TransitionTask(context.Context, domain.Task, int64, string) (domain.Task, error) {
 	return domain.Task{}, nil
+}
+func (repository) ClaimTask(context.Context, int64, domain.AgentIdentity, time.Time) (domain.TaskView, error) {
+	return domain.TaskView{}, nil
+}
+func (repository) ClaimNext(context.Context, domain.AgentIdentity, time.Time) (domain.TaskView, error) {
+	return domain.TaskView{}, nil
+}
+func (repository) ReleaseClaim(context.Context, int64, domain.AgentIdentity, string, time.Time) (domain.TaskView, error) {
+	return domain.TaskView{}, nil
+}
+func (repository) UpdateProgress(context.Context, int64, int, string, domain.AgentIdentity, time.Time) (domain.TaskView, error) {
+	return domain.TaskView{}, nil
+}
+func (repository) CompleteClaimedTask(context.Context, int64, string, domain.AgentIdentity, time.Time) (domain.TaskView, error) {
+	return domain.TaskView{}, nil
 }
 
 func TestLifecycleActionsEditAndHelp(t *testing.T) {
@@ -335,7 +362,7 @@ func TestResponsiveRenderingAndResize(t *testing.T) {
 			model := load(t, New(context.Background(), service))
 			model, _ = update(t, model, tea.WindowSizeMsg{Width: tc.width, Height: 20})
 			view := model.render()
-			for _, want := range []string{"A recognisable task", "[ready]", "URGENT"} {
+			for _, want := range []string{"A recognisable task", "[available]", "URGENT"} {
 				if !strings.Contains(view, want) {
 					t.Fatalf("%s view missing %q: %q", tc.name, want, view)
 				}
@@ -345,5 +372,53 @@ func TestResponsiveRenderingAndResize(t *testing.T) {
 				t.Fatalf("resize width=%d height=%d view=%q", model.width, model.height, model.render())
 			}
 		})
+	}
+}
+
+func TestAgentCoordinationRendering(t *testing.T) {
+	task := makeTask(8, "Parser", domain.PriorityHigh, domain.LifecycleReady)
+	task.Progress, task.Phase = 65, "Error recovery"
+	claimed := time.Date(2026, 8, 23, 12, 30, 0, 0, time.UTC)
+	claim := &domain.Claim{TaskID: 8, AgentName: "codex", InstanceID: "session-123", ClaimedAt: claimed}
+	view := domain.NewTaskView(task, claim)
+	model := New(context.Background(), &fakeService{})
+	model.loading, model.tasks, model.selectedID = false, []domain.TaskView{view}, 8
+	model.restoreSelection()
+	for _, want := range []string{"[working]", "codex", "session-123", "65%", "Error recovery"} {
+		if !strings.Contains(model.render(), want) {
+			t.Fatalf("list missing %q: %q", want, model.render())
+		}
+	}
+	model.route = routeDetail
+	for _, want := range []string{"Operational state: working", "Agent: codex", "Instance: session-123", "Progress: 65%", "Phase: Error recovery"} {
+		if !strings.Contains(model.render(), want) {
+			t.Fatalf("detail missing %q: %q", want, model.render())
+		}
+	}
+	model.width = 38
+	if !strings.Contains(model.render(), "working") {
+		t.Fatalf("narrow detail=%q", model.render())
+	}
+}
+
+func TestClaimedTaskLifecycleConflictIsRecoverable(t *testing.T) {
+	task := makeTask(8, "Parser", domain.PriorityHigh, domain.LifecycleReady)
+	claim := &domain.Claim{TaskID: 8, AgentName: "codex", InstanceID: "session-123", ClaimedAt: time.Now().UTC()}
+	view := domain.NewTaskView(task, claim)
+	service := &fakeService{tasks: []domain.Task{task}, actionErr: fmt.Errorf("task is actively claimed: %w", domain.ErrConflict)}
+	model := New(context.Background(), service)
+	model.loading, model.tasks, model.selectedID = false, []domain.TaskView{view}, 8
+	model.restoreSelection()
+	model, cmd := update(t, model, key("d"))
+	if cmd == nil {
+		t.Fatal("expected lifecycle command")
+	}
+	model, _ = update(t, model, cmd())
+	if model.route != routeList || model.actionErr == nil || !strings.Contains(model.render(), "actively claimed") || model.tasks[0].Lifecycle != domain.LifecycleReady {
+		t.Fatalf("model=%+v view=%q", model, model.render())
+	}
+	model, cmd = update(t, model, key("j"))
+	if cmd != nil || model.route != routeList {
+		t.Fatal("model should remain usable")
 	}
 }

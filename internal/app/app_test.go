@@ -19,10 +19,12 @@ type memoryRepository struct {
 func (r *memoryRepository) CreateTask(context.Context, domain.Task) (domain.Task, error) {
 	return domain.Task{}, nil
 }
-func (r *memoryRepository) ListTasks(context.Context) ([]domain.Task, error) {
-	return []domain.Task{r.task}, nil
+func (r *memoryRepository) ListTasks(context.Context) ([]domain.TaskView, error) {
+	return []domain.TaskView{domain.NewTaskView(r.task, nil)}, nil
 }
-func (r *memoryRepository) GetTask(context.Context, int64) (domain.Task, error) { return r.task, nil }
+func (r *memoryRepository) GetTask(context.Context, int64) (domain.TaskView, error) {
+	return domain.NewTaskView(r.task, nil), nil
+}
 func (r *memoryRepository) EditTask(_ context.Context, task domain.Task, expected int64) (domain.Task, error) {
 	if r.conflict {
 		return domain.Task{}, domain.ErrConflict
@@ -36,6 +38,21 @@ func (r *memoryRepository) TransitionTask(_ context.Context, task domain.Task, e
 	}
 	r.expected, r.reason, r.task = expected, reason, task
 	return task, nil
+}
+func (r *memoryRepository) ClaimTask(context.Context, int64, domain.AgentIdentity, time.Time) (domain.TaskView, error) {
+	return domain.TaskView{}, nil
+}
+func (r *memoryRepository) ClaimNext(context.Context, domain.AgentIdentity, time.Time) (domain.TaskView, error) {
+	return domain.TaskView{}, nil
+}
+func (r *memoryRepository) ReleaseClaim(context.Context, int64, domain.AgentIdentity, string, time.Time) (domain.TaskView, error) {
+	return domain.TaskView{}, nil
+}
+func (r *memoryRepository) UpdateProgress(context.Context, int64, int, string, domain.AgentIdentity, time.Time) (domain.TaskView, error) {
+	return domain.TaskView{}, nil
+}
+func (r *memoryRepository) CompleteClaimedTask(context.Context, int64, string, domain.AgentIdentity, time.Time) (domain.TaskView, error) {
+	return domain.TaskView{}, nil
 }
 
 func TestEditAndLifecycleSemantics(t *testing.T) {
