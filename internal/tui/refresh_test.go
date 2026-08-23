@@ -131,7 +131,7 @@ func TestAutoRefreshDoesNotDisturbActiveForms(t *testing.T) {
 			}
 			model, cmd := update(t, model, key("d"))
 			model = runCmd(t, model, cmd)
-			typed := model.form.inputs[model.form.focus].Value()
+			typed := focusedValue(model.form)
 			focus := model.form.focus
 			listCalls := service.listCalls
 			for i := 0; i < 3; i++ {
@@ -144,8 +144,8 @@ func TestAutoRefreshDoesNotDisturbActiveForms(t *testing.T) {
 			if model.refreshing || service.listCalls != listCalls {
 				t.Fatalf("tick refreshed behind a form: refreshing=%v calls=%d→%d", model.refreshing, listCalls, service.listCalls)
 			}
-			if model.form.focus != focus || model.form.inputs[model.form.focus].Value() != typed {
-				t.Fatalf("tick disturbed input: focus=%d value=%q", model.form.focus, model.form.inputs[model.form.focus].Value())
+			if model.form.focus != focus || focusedValue(model.form) != typed {
+				t.Fatalf("tick disturbed input: focus=%d value=%q", model.form.focus, focusedValue(model.form))
 			}
 		})
 	}

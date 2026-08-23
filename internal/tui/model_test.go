@@ -163,6 +163,18 @@ func makeTask(id int64, title string, priority domain.Priority, lifecycle domain
 	return domain.Task{ID: id, UID: "uid", Title: title, Description: "Description for " + title, Priority: priority, Lifecycle: lifecycle, CreatedAt: now, UpdatedAt: now, Version: 1}
 }
 
+// focusedValue reads the value of the form field that currently has focus.
+func focusedValue(f formModel) string {
+	switch f.focus {
+	case focusDescription:
+		return f.description.Value()
+	case focusPriority:
+		return f.priority.Value()
+	default:
+		return f.input.Value()
+	}
+}
+
 func key(value string) tea.KeyPressMsg {
 	switch value {
 	case "enter":
@@ -261,9 +273,9 @@ func TestSuccessfulTaskCreation(t *testing.T) {
 	if model.route != routeForm {
 		t.Fatalf("route=%v", model.route)
 	}
-	model.form.inputs[0].SetValue("Created interactively")
-	model.form.inputs[1].SetValue("Details")
-	model.form.inputs[2].SetValue("high")
+	model.form.input.SetValue("Created interactively")
+	model.form.description.SetValue("Details")
+	model.form.priority.SetValue("high")
 	model.form.focus = 2
 	model, cmd := update(t, model, key("enter"))
 	if cmd == nil || !model.form.saving {
@@ -285,7 +297,7 @@ func TestPrintableShortcutsAreTextInEditForm(t *testing.T) {
 			service := &fakeService{tasks: []domain.Task{makeTask(1, "Original", domain.PriorityNormal, domain.LifecycleBacklog)}}
 			model := load(t, New(context.Background(), service))
 			model, _ = update(t, model, key("e"))
-			model.form.inputs[0].SetValue("")
+			model.form.input.SetValue("")
 			model, cmd := update(t, model, key(printable))
 			assertPrintableStayedInForm(t, model, cmd, printable)
 			if service.tasks[0].Title != "Original" || service.tasks[0].Lifecycle != domain.LifecycleBacklog {
@@ -318,7 +330,7 @@ func assertPrintableStayedInForm(t *testing.T, model Model, cmd tea.Cmd, want st
 	if model.route != routeForm {
 		t.Fatalf("%q changed route to %v", want, model.route)
 	}
-	if got := model.form.inputs[0].Value(); got != want {
+	if got := model.form.input.Value(); got != want {
 		t.Fatalf("input value=%q, want %q", got, want)
 	}
 }
@@ -377,11 +389,11 @@ func TestLifecycleActionsEditAndHelp(t *testing.T) {
 	service := &fakeService{tasks: []domain.Task{makeTask(1, "First", domain.PriorityLow, domain.LifecycleBacklog), makeTask(2, "Second", domain.PriorityHigh, domain.LifecycleReady)}}
 	model := load(t, New(context.Background(), service))
 	model, _ = update(t, model, key("e"))
-	if model.route != routeForm || !model.form.editing || model.form.inputs[0].Value() != "First" {
+	if model.route != routeForm || !model.form.editing || model.form.input.Value() != "First" {
 		t.Fatalf("edit form=%+v", model.form)
 	}
-	model.form.inputs[0].SetValue("Edited")
-	model.form.inputs[2].SetValue("urgent")
+	model.form.input.SetValue("Edited")
+	model.form.priority.SetValue("urgent")
 	model.form.focus = 2
 	model, cmd := update(t, model, key("enter"))
 	model, cmd = update(t, model, cmd())
@@ -402,7 +414,7 @@ func TestLifecycleActionsEditAndHelp(t *testing.T) {
 	if !model.form.cancelling {
 		t.Fatal("cancel should open reason form")
 	}
-	model.form.inputs[0].SetValue("superseded")
+	model.form.input.SetValue("superseded")
 	model, cmd = update(t, model, key("enter"))
 	model, cmd = update(t, model, cmd())
 	model, _ = update(t, model, cmd())
@@ -438,7 +450,7 @@ func TestApplicationErrorsRemainVisible(t *testing.T) {
 	service := &fakeService{addErr: errors.New("write failed")}
 	model = load(t, New(context.Background(), service))
 	model, _ = update(t, model, key("n"))
-	model.form.inputs[0].SetValue("Task")
+	model.form.input.SetValue("Task")
 	model.form.focus = 2
 	model, cmd := update(t, model, key("enter"))
 	model, _ = update(t, model, cmd())
@@ -565,7 +577,7 @@ func TestQuestionNavigationAnswerAndSelectionPreserved(t *testing.T) {
 	if model.route != routeForm || !model.form.answering || model.form.questionID != 1 {
 		t.Fatalf("answer form=%+v route=%v", model.form, model.route)
 	}
-	model.form.inputs[0].SetValue("Yes, preserve them")
+	model.form.input.SetValue("Yes, preserve them")
 	model, cmd = update(t, model, key("enter"))
 	if cmd == nil || !model.form.saving {
 		t.Fatal("expected answer command")
@@ -742,7 +754,7 @@ func TestDependencyNavigationAddRemoveAndSelection(t *testing.T) {
 	if model.route != routeForm || !model.form.depending {
 		t.Fatalf("form=%+v", model.form)
 	}
-	model.form.inputs[0].SetValue("4")
+	model.form.input.SetValue("4")
 	model, cmd = update(t, model, key("enter"))
 	if cmd == nil || !model.form.saving {
 		t.Fatal("expected add command")
@@ -764,14 +776,14 @@ func TestDependencyFormValidationAndCycleRecovery(t *testing.T) {
 	model = runCmd(t, model, cmd)
 	model, _ = update(t, model, key("n"))
 	// A non-numeric prerequisite is rejected locally and recoverable.
-	model.form.inputs[0].SetValue("nope")
+	model.form.input.SetValue("nope")
 	model, cmd = update(t, model, key("enter"))
 	if cmd != nil || model.form.err == nil {
 		t.Fatalf("invalid id err=%v", model.form.err)
 	}
 	// A cycle conflict surfaces in the form and the model stays usable.
 	service.depErr = fmt.Errorf("dependency would create a cycle: %w", domain.ErrConflict)
-	model.form.inputs[0].SetValue("7")
+	model.form.input.SetValue("7")
 	model, cmd = update(t, model, key("enter"))
 	if cmd == nil {
 		t.Fatal("expected add command")

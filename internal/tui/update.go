@@ -160,18 +160,18 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// updatePaste delivers bracketed-paste text to the focused form input, so
-// pasted content is never interpreted as key presses. Outside a form there is
-// no text entry and the paste is discarded.
+// updatePaste delivers bracketed-paste text to the focused form field, so
+// pasted content is never interpreted as key presses. The description
+// textarea keeps line breaks; single-line inputs replace each newline with a
+// space — collapse CRLF pairs first so a Windows-style paste neither doubles
+// spaces nor leaves stray carriage returns. Outside a form there is no text
+// entry and the paste is discarded.
 func (m Model) updatePaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
 	if m.route != routeForm || m.form.saving {
 		return m, nil
 	}
-	// Single-line inputs replace each newline with a space; collapse CRLF
-	// pairs first so a Windows-style paste does not produce double spaces.
 	msg.Content = strings.ReplaceAll(msg.Content, "\r\n", "\n")
-	var cmd tea.Cmd
-	m.form.inputs[m.form.focus], cmd = m.form.inputs[m.form.focus].Update(msg)
+	cmd := m.form.updateFocused(msg)
 	if m.form.err != nil {
 		m.form.err = nil
 	}
@@ -360,7 +360,7 @@ func (m Model) updateForm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.form.depending {
 		if msg.String() == "enter" {
-			dependsOn, err := strconv.ParseInt(strings.TrimSpace(m.form.inputs[0].Value()), 10, 64)
+			dependsOn, err := strconv.ParseInt(strings.TrimSpace(m.form.input.Value()), 10, 64)
 			if err != nil || dependsOn < 1 {
 				m.form.err = fmt.Errorf("prerequisite must be a positive task ID")
 				return m, nil
@@ -369,7 +369,7 @@ func (m Model) updateForm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, m.addDependency(m.form.taskID, dependsOn)
 		}
 		var cmd tea.Cmd
-		m.form.inputs[0], cmd = m.form.inputs[0].Update(msg)
+		m.form.input, cmd = m.form.input.Update(msg)
 		if m.form.err != nil {
 			m.form.err = nil
 		}
@@ -377,15 +377,15 @@ func (m Model) updateForm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.form.answering {
 		if msg.String() == "enter" {
-			if strings.TrimSpace(m.form.inputs[0].Value()) == "" {
+			if strings.TrimSpace(m.form.input.Value()) == "" {
 				m.form.err = fmt.Errorf("answer must not be empty")
 				return m, nil
 			}
 			m.form.err, m.form.saving = nil, true
-			return m, m.answerQuestion(m.form.questionID, m.form.inputs[0].Value())
+			return m, m.answerQuestion(m.form.questionID, m.form.input.Value())
 		}
 		var cmd tea.Cmd
-		m.form.inputs[0], cmd = m.form.inputs[0].Update(msg)
+		m.form.input, cmd = m.form.input.Update(msg)
 		if m.form.err != nil {
 			m.form.err = nil
 		}
@@ -394,28 +394,32 @@ func (m Model) updateForm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.form.cancelling {
 		if msg.String() == "enter" {
 			m.form.err, m.form.saving = nil, true
-			return m, m.cancelTask(m.form.taskID, m.form.inputs[0].Value())
+			return m, m.cancelTask(m.form.taskID, m.form.input.Value())
 		}
 		var cmd tea.Cmd
-		m.form.inputs[0], cmd = m.form.inputs[0].Update(msg)
+		m.form.input, cmd = m.form.input.Update(msg)
 		if m.form.err != nil {
 			m.form.err = nil
 		}
 		return m, cmd
 	}
-	switch msg.String() {
-	case "tab", "down":
+	// Create/edit form. Tab and Shift-Tab always cycle Title → Description →
+	// Priority. Up/down also cycle on the single-line fields but move the
+	// cursor inside the description textarea, and enter advances from the
+	// title, inserts a newline in the description, and saves from priority —
+	// so every character-producing key reaches the focused widget as text.
+	switch key := msg.String(); {
+	case key == "tab" || (key == "down" && m.form.focus != focusDescription):
 		m.form.moveFocus(1)
 		return m, nil
-	case "shift+tab", "up":
+	case key == "shift+tab" || (key == "up" && m.form.focus != focusDescription):
 		m.form.moveFocus(-1)
 		return m, nil
-	case "enter":
-		if m.form.focus < len(m.form.inputs)-1 {
-			m.form.moveFocus(1)
-			return m, nil
-		}
-		priority, err := domain.ParsePriority(m.form.inputs[2].Value())
+	case key == "enter" && m.form.focus == focusTitle:
+		m.form.moveFocus(1)
+		return m, nil
+	case key == "enter" && m.form.focus == focusPriority:
+		priority, err := domain.ParsePriority(m.form.priority.Value())
 		if err != nil {
 			m.form.err = fmt.Errorf("priority must be low, normal, high, or urgent")
 			return m, nil
@@ -423,13 +427,12 @@ func (m Model) updateForm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.form.err = nil
 		m.form.saving = true
 		if m.form.editing {
-			title, description := m.form.inputs[0].Value(), m.form.inputs[1].Value()
+			title, description := m.form.input.Value(), m.form.description.Value()
 			return m, m.editTask(m.form.taskID, app.EditTaskInput{Title: &title, Description: &description, Priority: &priority})
 		}
-		return m, m.createTask(app.AddTaskInput{Title: m.form.inputs[0].Value(), Description: m.form.inputs[1].Value(), Priority: priority, Lifecycle: domain.LifecycleBacklog})
+		return m, m.createTask(app.AddTaskInput{Title: m.form.input.Value(), Description: m.form.description.Value(), Priority: priority, Lifecycle: domain.LifecycleBacklog})
 	}
-	var cmd tea.Cmd
-	m.form.inputs[m.form.focus], cmd = m.form.inputs[m.form.focus].Update(msg)
+	cmd := m.form.updateFocused(msg)
 	if m.form.err != nil {
 		m.form.err = nil
 	}
@@ -446,9 +449,38 @@ func (m *Model) scrollDetailBy(delta int) {
 }
 
 func (f *formModel) moveFocus(delta int) {
-	f.inputs[f.focus].Blur()
-	f.focus = (f.focus + delta + len(f.inputs)) % len(f.inputs)
-	f.inputs[f.focus].Focus()
+	switch f.focus {
+	case focusDescription:
+		f.description.Blur()
+	case focusPriority:
+		f.priority.Blur()
+	default:
+		f.input.Blur()
+	}
+	f.focus = (f.focus + delta + formFieldCount) % formFieldCount
+	switch f.focus {
+	case focusDescription:
+		f.description.Focus()
+	case focusPriority:
+		f.priority.Focus()
+	default:
+		f.input.Focus()
+	}
+}
+
+// updateFocused forwards a message (key press or paste) to the focused form
+// field. The single-field form variants keep focus on the primary input.
+func (f *formModel) updateFocused(msg tea.Msg) tea.Cmd {
+	var cmd tea.Cmd
+	switch f.focus {
+	case focusDescription:
+		f.description, cmd = f.description.Update(msg)
+	case focusPriority:
+		f.priority, cmd = f.priority.Update(msg)
+	default:
+		f.input, cmd = f.input.Update(msg)
+	}
+	return cmd
 }
 
 func (m *Model) restoreQuestionSelection() {
@@ -510,7 +542,19 @@ func (m *Model) sizeForm() {
 	if width > 72 {
 		width = 72
 	}
-	for i := range m.form.inputs {
-		m.form.inputs[i].SetWidth(width)
+	m.form.input.SetWidth(width)
+	m.form.priority.SetWidth(width)
+	m.form.description.SetWidth(width)
+	// The visible description height tracks the terminal: the create/edit
+	// form spends 11 fixed rows on heading, labels, single-line fields, and
+	// footer, plus up to 2 for an error or saving notice. Content beyond the
+	// visible rows scrolls inside the widget's own viewport.
+	height := m.height - 13
+	if height < 3 {
+		height = 3
 	}
+	if height > 12 {
+		height = 12
+	}
+	m.form.description.SetHeight(height)
 }
