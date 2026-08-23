@@ -193,15 +193,47 @@ func TestSuccessfulTaskCreation(t *testing.T) {
 	}
 }
 
-func TestUppercaseQIsTextInTaskForm(t *testing.T) {
-	model := load(t, New(context.Background(), &fakeService{}))
-	model, _ = update(t, model, key("n"))
-	model, cmd := update(t, model, key("Q"))
-	if cmd != nil && reflect.TypeOf(cmd()) == reflect.TypeOf(tea.Quit()) {
-		t.Fatal("uppercase Q returned the global quit command while editing")
+func TestPrintableShortcutsAreTextInEditForm(t *testing.T) {
+	for _, printable := range []string{"e", "a", "d", "x", "Q"} {
+		t.Run(printable, func(t *testing.T) {
+			service := &fakeService{tasks: []domain.Task{makeTask(1, "Original", domain.PriorityNormal, domain.LifecycleBacklog)}}
+			model := load(t, New(context.Background(), service))
+			model, _ = update(t, model, key("e"))
+			model.form.inputs[0].SetValue("")
+			model, cmd := update(t, model, key(printable))
+			assertPrintableStayedInForm(t, model, cmd, printable)
+			if service.tasks[0].Title != "Original" || service.tasks[0].Lifecycle != domain.LifecycleBacklog {
+				t.Fatalf("shortcut triggered a task action: %+v", service.tasks[0])
+			}
+		})
 	}
-	if got := model.form.inputs[0].Value(); got != "Q" {
-		t.Fatalf("title value=%q, want Q", got)
+}
+
+func TestPrintableShortcutsAreTextInCancellationReasonForm(t *testing.T) {
+	for _, printable := range []string{"e", "a", "d", "x", "Q"} {
+		t.Run(printable, func(t *testing.T) {
+			service := &fakeService{tasks: []domain.Task{makeTask(1, "Original", domain.PriorityNormal, domain.LifecycleBacklog)}}
+			model := load(t, New(context.Background(), service))
+			model, _ = update(t, model, key("x"))
+			model, cmd := update(t, model, key(printable))
+			assertPrintableStayedInForm(t, model, cmd, printable)
+			if service.tasks[0].Lifecycle != domain.LifecycleBacklog {
+				t.Fatalf("shortcut triggered cancellation: %+v", service.tasks[0])
+			}
+		})
+	}
+}
+
+func assertPrintableStayedInForm(t *testing.T, model Model, cmd tea.Cmd, want string) {
+	t.Helper()
+	if cmd != nil && reflect.TypeOf(cmd()) == reflect.TypeOf(tea.Quit()) {
+		t.Fatalf("%q returned the quit command while editing", want)
+	}
+	if model.route != routeForm {
+		t.Fatalf("%q changed route to %v", want, model.route)
+	}
+	if got := model.form.inputs[0].Value(); got != want {
+		t.Fatalf("input value=%q, want %q", got, want)
 	}
 }
 
