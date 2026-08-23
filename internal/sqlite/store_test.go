@@ -35,7 +35,7 @@ func TestMigrationAndReopen(t *testing.T) {
 	if err = s.db.QueryRow("SELECT MAX(version) FROM schema_migrations").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 2 {
+	if version != 3 {
 		t.Fatalf("version=%d", version)
 	}
 	if err = s.Close(); err != nil {
@@ -62,7 +62,7 @@ func TestMigrationAndReopen(t *testing.T) {
 	}
 }
 
-func TestMigration002FromExistingDatabase(t *testing.T) {
+func TestMigrationsFromExistingV1Database(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "v1.db")
 	db, err := sql.Open("sqlite", "file:"+path)
 	if err != nil {
@@ -91,11 +91,58 @@ func TestMigration002FromExistingDatabase(t *testing.T) {
 	}
 	defer s.Close()
 	var version int
-	if err = s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 2 {
+	if err = s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 3 {
 		t.Fatalf("version=%d err=%v", version, err)
 	}
 	if _, err = s.db.Exec(`INSERT INTO events(kind,actor_kind,payload_json,created_at) VALUES('probe','human','{}',?)`, formatTime(time.Now().UTC())); err != nil {
 		t.Fatalf("events table unavailable: %v", err)
+	}
+}
+
+func TestMigration003FromExistingV2Database(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v2.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	for version, name := range []string{"001_initial.sql", "002_events.sql"} {
+		body, readErr := migrationFiles.ReadFile("migrations/" + name)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if _, err = db.Exec(string(body)); err != nil {
+			t.Fatal(err)
+		}
+		checksum := fmt.Sprintf("%x", sha256.Sum256(body))
+		if _, err = db.Exec(`INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)`, version+1, checksum, formatTime(time.Now().UTC())); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var version int
+	if err = s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 3 {
+		t.Fatalf("version=%d err=%v", version, err)
+	}
+	var table string
+	if err = s.db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='claims'`).Scan(&table); err != nil || table != "claims" {
+		t.Fatalf("claims=%q err=%v", table, err)
 	}
 }
 
@@ -227,5 +274,170 @@ func TestBasicConcurrentAccess(t *testing.T) {
 	}
 	if len(tasks) != 20 {
 		t.Fatalf("len=%d", len(tasks))
+	}
+}
+
+func createReadyTask(t *testing.T, store *Store, uid string, priority domain.Priority) domain.Task {
+	t.Helper()
+	now := time.Now().UTC()
+	task, err := store.CreateTask(context.Background(), domain.Task{UID: uid, Title: uid, Lifecycle: domain.LifecycleReady, Priority: priority, CreatedAt: now, UpdatedAt: now, Version: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return task
+}
+
+func TestClaimOwnershipProgressReleaseAndHistory(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	task := createReadyTask(t, s, "coordination", domain.PriorityHigh)
+	owner := domain.AgentIdentity{AgentName: "codex", InstanceID: "one"}
+	other := domain.AgentIdentity{AgentName: "claude", InstanceID: "two"}
+	now := time.Now().UTC()
+	view, err := s.ClaimTask(ctx, task.ID, owner, now)
+	if err != nil || view.ActiveClaim == nil || *view.OperationalState != domain.OperationalWorking {
+		t.Fatalf("claim=%+v err=%v", view, err)
+	}
+	repeated, err := s.ClaimTask(ctx, task.ID, owner, now.Add(time.Second))
+	if err != nil || repeated.ActiveClaim.ID != view.ActiveClaim.ID {
+		t.Fatalf("idempotent=%+v err=%v", repeated, err)
+	}
+	if _, err = s.ClaimTask(ctx, task.ID, other, now); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("other claim=%v", err)
+	}
+	if _, err = s.UpdateProgress(ctx, task.ID, 60, "building", other, now); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("other progress=%v", err)
+	}
+	view, err = s.UpdateProgress(ctx, task.ID, 60, "building", owner, now.Add(2*time.Second))
+	if err != nil || view.Progress != 60 || view.Phase != "building" || view.Version != 2 {
+		t.Fatalf("progress=%+v err=%v", view, err)
+	}
+	view, err = s.UpdateProgress(ctx, task.ID, 20, "reworking", owner, now.Add(3*time.Second))
+	if err != nil || view.Progress != 20 {
+		t.Fatalf("regression=%+v err=%v", view, err)
+	}
+	if _, err = s.ReleaseClaim(ctx, task.ID, other, "", now); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("other release=%v", err)
+	}
+	view, err = s.ReleaseClaim(ctx, task.ID, owner, "handoff", now.Add(4*time.Second))
+	if err != nil || view.ActiveClaim != nil || *view.OperationalState != domain.OperationalAvailable || view.Progress != 20 {
+		t.Fatalf("release=%+v err=%v", view, err)
+	}
+	var released, events int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM claims WHERE task_id=? AND released_at IS NOT NULL`, task.ID).Scan(&released)
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM events WHERE task_id=? AND actor_kind='agent'`, task.ID).Scan(&events)
+	if released != 1 || events != 4 {
+		t.Fatalf("released=%d events=%d", released, events)
+	}
+	view, err = s.ClaimTask(ctx, task.ID, other, now.Add(5*time.Second))
+	if err != nil || view.ActiveClaim == nil || view.ActiveClaim.ID == repeated.ActiveClaim.ID {
+		t.Fatalf("reclaim=%+v err=%v", view, err)
+	}
+	var history int
+	if err = s.db.QueryRow(`SELECT COUNT(*) FROM claims WHERE task_id=?`, task.ID).Scan(&history); err != nil || history != 2 {
+		t.Fatalf("history=%d err=%v", history, err)
+	}
+}
+
+func TestAgentCompletionIsAtomic(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	task := createReadyTask(t, s, "complete", domain.PriorityNormal)
+	owner := domain.AgentIdentity{AgentName: "codex", InstanceID: "one"}
+	now := time.Now().UTC()
+	if _, err := s.ClaimTask(ctx, task.ID, owner, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`CREATE TRIGGER reject_agent_completion BEFORE INSERT ON events WHEN NEW.kind='task_completed' AND NEW.actor_kind='agent' BEGIN SELECT RAISE(ABORT, 'reject completion'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CompleteClaimedTask(ctx, task.ID, "summary", owner, now.Add(time.Second)); err == nil {
+		t.Fatal("expected completion failure")
+	}
+	view, err := s.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Lifecycle != domain.LifecycleReady || view.Progress != 0 || view.CompletionSummary != "" || view.ActiveClaim == nil {
+		t.Fatalf("partial completion=%+v", view)
+	}
+	if _, err = s.db.Exec(`DROP TRIGGER reject_agent_completion`); err != nil {
+		t.Fatal(err)
+	}
+	view, err = s.CompleteClaimedTask(ctx, task.ID, "summary", owner, now.Add(2*time.Second))
+	if err != nil || view.Lifecycle != domain.LifecycleDone || view.Progress != 100 || view.CompletionSummary != "summary" || view.ActiveClaim != nil {
+		t.Fatalf("completion=%+v err=%v", view, err)
+	}
+}
+
+func TestConcurrentClaims(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		next        bool
+		tasks       int
+		wantSuccess int
+	}{{"explicit one task", false, 1, 1}, {"next one task", true, 1, 1}, {"next two tasks", true, 2, 2}} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "race.db")
+			first, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer first.Close()
+			second, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer second.Close()
+			var target domain.Task
+			for i := 0; i < tc.tasks; i++ {
+				target = createReadyTask(t, first, fmt.Sprintf("race-%d", i), domain.PriorityUrgent)
+			}
+			stores := []*Store{first, second}
+			start := make(chan struct{})
+			results := make(chan struct {
+				view domain.TaskView
+				err  error
+			}, 2)
+			for i := 0; i < 2; i++ {
+				go func(i int) {
+					<-start
+					identity := domain.AgentIdentity{AgentName: fmt.Sprintf("agent-%d", i), InstanceID: fmt.Sprintf("instance-%d", i)}
+					var view domain.TaskView
+					var err error
+					if tc.next {
+						view, err = stores[i].ClaimNext(context.Background(), identity, time.Now().UTC())
+					} else {
+						view, err = stores[i].ClaimTask(context.Background(), target.ID, identity, time.Now().UTC())
+					}
+					results <- struct {
+						view domain.TaskView
+						err  error
+					}{view, err}
+				}(i)
+			}
+			close(start)
+			successes := 0
+			ids := map[int64]bool{}
+			for i := 0; i < 2; i++ {
+				result := <-results
+				if result.err == nil {
+					successes++
+					if ids[result.view.ID] {
+						t.Fatalf("task %d claimed twice", result.view.ID)
+					}
+					ids[result.view.ID] = true
+				} else if !errors.Is(result.err, domain.ErrConflict) && !errors.Is(result.err, domain.ErrNoEligible) {
+					t.Fatalf("unexpected err=%v", result.err)
+				}
+			}
+			if successes != tc.wantSuccess {
+				t.Fatalf("successes=%d want=%d", successes, tc.wantSuccess)
+			}
+			var active, distinct int
+			if err = first.db.QueryRow(`SELECT COUNT(*),COUNT(DISTINCT task_id) FROM claims WHERE released_at IS NULL`).Scan(&active, &distinct); err != nil || active != distinct || active != tc.wantSuccess {
+				t.Fatalf("active=%d distinct=%d err=%v", active, distinct, err)
+			}
+		})
 	}
 }

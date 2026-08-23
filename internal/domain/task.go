@@ -19,11 +19,13 @@ func NewUUID() (string, error) {
 }
 
 const MaxTitleLength = 500
+const MaxAgentIdentityLength = 200
 
 var (
-	ErrInvalid  = errors.New("invalid input")
-	ErrNotFound = errors.New("not found")
-	ErrConflict = errors.New("conflict")
+	ErrInvalid    = errors.New("invalid input")
+	ErrNotFound   = errors.New("not found")
+	ErrConflict   = errors.New("conflict")
+	ErrNoEligible = errors.New("no eligible task")
 )
 
 type Lifecycle string
@@ -79,6 +81,51 @@ type Task struct {
 	CompletedAt       *time.Time
 	CancelledAt       *time.Time
 	Version           int64
+}
+
+type AgentIdentity struct{ AgentName, InstanceID string }
+
+func ValidateAgentIdentity(identity AgentIdentity) error {
+	for _, value := range []string{identity.AgentName, identity.InstanceID} {
+		if strings.TrimSpace(value) == "" || len([]rune(value)) > MaxAgentIdentityLength {
+			return ErrInvalid
+		}
+	}
+	return nil
+}
+
+type Claim struct {
+	ID         int64
+	TaskID     int64
+	AgentName  string
+	InstanceID string
+	ClaimedAt  time.Time
+	ReleasedAt *time.Time
+}
+
+type OperationalState string
+
+const (
+	OperationalAvailable OperationalState = "available"
+	OperationalWorking   OperationalState = "working"
+)
+
+type TaskView struct {
+	Task
+	OperationalState *OperationalState
+	ActiveClaim      *Claim
+}
+
+func NewTaskView(task Task, claim *Claim) TaskView {
+	view := TaskView{Task: task, ActiveClaim: claim}
+	if task.Lifecycle == LifecycleReady {
+		state := OperationalAvailable
+		if claim != nil {
+			state = OperationalWorking
+		}
+		view.OperationalState = &state
+	}
+	return view
 }
 
 type Project struct {

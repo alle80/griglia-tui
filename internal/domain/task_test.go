@@ -30,3 +30,27 @@ func TestLifecycleTransitions(t *testing.T) {
 		}
 	}
 }
+
+func TestAgentIdentityAndOperationalState(t *testing.T) {
+	if err := ValidateAgentIdentity(AgentIdentity{AgentName: "codex", InstanceID: "session-1"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, identity := range []AgentIdentity{{InstanceID: "x"}, {AgentName: "x"}, {AgentName: " ", InstanceID: "x"}} {
+		if !errors.Is(ValidateAgentIdentity(identity), ErrInvalid) {
+			t.Fatalf("identity=%+v", identity)
+		}
+	}
+	task := Task{Lifecycle: LifecycleReady}
+	view := NewTaskView(task, nil)
+	if view.OperationalState == nil || *view.OperationalState != OperationalAvailable {
+		t.Fatalf("available=%+v", view)
+	}
+	claim := &Claim{AgentName: "codex", InstanceID: "one"}
+	view = NewTaskView(task, claim)
+	if view.OperationalState == nil || *view.OperationalState != OperationalWorking || view.ActiveClaim != claim {
+		t.Fatalf("working=%+v", view)
+	}
+	if view = NewTaskView(Task{Lifecycle: LifecycleDone}, nil); view.OperationalState != nil {
+		t.Fatalf("terminal state=%+v", view)
+	}
+}

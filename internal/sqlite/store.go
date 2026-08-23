@@ -24,7 +24,7 @@ var migrationFiles embed.FS
 type Store struct{ db *sql.DB }
 
 func Open(path string) (*Store, error) {
-	dsn := "file:" + path + "?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
+	dsn := "file:" + path + "?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -160,7 +160,7 @@ func (s *Store) mutateTask(ctx context.Context, t domain.Task, expected int64, k
 		return domain.Task{}, err
 	}
 	defer tx.Rollback()
-	r, err := tx.ExecContext(ctx, `UPDATE tasks SET title=?,description=?,lifecycle=?,priority=?,progress=?,updated_at=?,completed_at=?,cancelled_at=?,version=? WHERE id=? AND version=?`, t.Title, t.Description, t.Lifecycle, t.Priority, t.Progress, formatTime(t.UpdatedAt), nullableTime(t.CompletedAt), nullableTime(t.CancelledAt), t.Version, t.ID, expected)
+	r, err := tx.ExecContext(ctx, `UPDATE tasks SET title=?,description=?,lifecycle=?,priority=?,progress=?,updated_at=?,completed_at=?,cancelled_at=?,version=? WHERE id=? AND version=? AND NOT EXISTS(SELECT 1 FROM claims WHERE task_id=? AND released_at IS NULL)`, t.Title, t.Description, t.Lifecycle, t.Priority, t.Progress, formatTime(t.UpdatedAt), nullableTime(t.CompletedAt), nullableTime(t.CancelledAt), t.Version, t.ID, expected, t.ID)
 	if err != nil {
 		return domain.Task{}, err
 	}
@@ -185,11 +185,15 @@ func (s *Store) mutateTask(ctx context.Context, t domain.Task, expected int64, k
 }
 
 func insertEvent(ctx context.Context, tx *sql.Tx, taskID int64, kind string, payload map[string]any, at time.Time) error {
+	return insertActorEvent(ctx, tx, taskID, kind, "human", "", payload, at)
+}
+
+func insertActorEvent(ctx context.Context, tx *sql.Tx, taskID int64, kind, actorKind, actorName string, payload map[string]any, at time.Time) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO events(task_id,kind,actor_kind,actor_name,payload_json,created_at) VALUES(?,?, 'human','',?,?)`, taskID, kind, string(body), formatTime(at))
+	_, err = tx.ExecContext(ctx, `INSERT INTO events(task_id,kind,actor_kind,actor_name,payload_json,created_at) VALUES(?,?,?,?,?,?)`, taskID, kind, actorKind, actorName, string(body), formatTime(at))
 	return err
 }
 
@@ -202,29 +206,262 @@ func nullableTime(value *time.Time) any {
 
 const taskColumns = `id,uid,title,description,lifecycle,priority,progress,phase,completion_summary,created_at,updated_at,completed_at,cancelled_at,version`
 
-func (s *Store) ListTasks(ctx context.Context) ([]domain.Task, error) {
+func (s *Store) ListTasks(ctx context.Context) ([]domain.TaskView, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+taskColumns+` FROM tasks ORDER BY CASE priority WHEN 'urgent' THEN 4 WHEN 'high' THEN 3 WHEN 'normal' THEN 2 ELSE 1 END DESC, created_at ASC, id ASC`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	tasks := make([]domain.Task, 0)
+	tasks := make([]domain.TaskView, 0)
 	for rows.Next() {
 		t, scanErr := scanTask(rows)
 		if scanErr != nil {
 			return nil, scanErr
 		}
-		tasks = append(tasks, t)
+		claim, claimErr := s.activeClaim(ctx, t.ID)
+		if claimErr != nil {
+			return nil, claimErr
+		}
+		tasks = append(tasks, domain.NewTaskView(t, claim))
 	}
 	return tasks, rows.Err()
 }
 
-func (s *Store) GetTask(ctx context.Context, id int64) (domain.Task, error) {
+func (s *Store) GetTask(ctx context.Context, id int64) (domain.TaskView, error) {
 	t, err := scanTask(s.db.QueryRowContext(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.TaskView{}, domain.ErrNotFound
+	}
+	if err != nil {
+		return domain.TaskView{}, err
+	}
+	claim, err := s.activeClaim(ctx, id)
+	if err != nil {
+		return domain.TaskView{}, err
+	}
+	return domain.NewTaskView(t, claim), nil
+}
+
+func (s *Store) activeClaim(ctx context.Context, taskID int64) (*domain.Claim, error) {
+	return scanOptionalClaim(s.db.QueryRowContext(ctx, `SELECT id,task_id,agent_name,instance_id,claimed_at,released_at FROM claims WHERE task_id=? AND released_at IS NULL`, taskID))
+}
+
+func scanOptionalClaim(row scanner) (*domain.Claim, error) {
+	var claim domain.Claim
+	var claimed string
+	var released sql.NullString
+	if err := row.Scan(&claim.ID, &claim.TaskID, &claim.AgentName, &claim.InstanceID, &claimed, &released); errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	var err error
+	if claim.ClaimedAt, err = parseTime(claimed); err != nil {
+		return nil, err
+	}
+	if released.Valid {
+		value, parseErr := parseTime(released.String)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		claim.ReleasedAt = &value
+	}
+	return &claim, nil
+}
+
+func taskFromTx(ctx context.Context, tx *sql.Tx, id int64) (domain.Task, error) {
+	t, err := scanTask(tx.QueryRowContext(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Task{}, domain.ErrNotFound
 	}
 	return t, err
+}
+func claimFromTx(ctx context.Context, tx *sql.Tx, id int64) (*domain.Claim, error) {
+	return scanOptionalClaim(tx.QueryRowContext(ctx, `SELECT id,task_id,agent_name,instance_id,claimed_at,released_at FROM claims WHERE task_id=? AND released_at IS NULL`, id))
+}
+
+func owns(claim *domain.Claim, identity domain.AgentIdentity) bool {
+	return claim != nil && claim.AgentName == identity.AgentName && claim.InstanceID == identity.InstanceID
+}
+
+func (s *Store) ClaimTask(ctx context.Context, id int64, identity domain.AgentIdentity, now time.Time) (domain.TaskView, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.TaskView{}, err
+	}
+	defer tx.Rollback()
+	task, err := taskFromTx(ctx, tx, id)
+	if err != nil {
+		return domain.TaskView{}, err
+	}
+	claim, err := claimFromTx(ctx, tx, id)
+	if err != nil {
+		return domain.TaskView{}, err
+	}
+	if claim != nil {
+		if owns(claim, identity) {
+			return domain.NewTaskView(task, claim), nil
+		}
+		return domain.TaskView{}, fmt.Errorf("task is already claimed: %w", domain.ErrConflict)
+	}
+	if task.Lifecycle != domain.LifecycleReady {
+		return domain.TaskView{}, fmt.Errorf("only ready tasks can be claimed: %w", domain.ErrConflict)
+	}
+	claim, err = createClaim(ctx, tx, task.ID, identity, now)
+	if err != nil {
+		return domain.TaskView{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return domain.TaskView{}, err
+	}
+	return domain.NewTaskView(task, claim), nil
+}
+
+func (s *Store) ClaimNext(ctx context.Context, identity domain.AgentIdentity, now time.Time) (domain.TaskView, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.TaskView{}, err
+	}
+	defer tx.Rollback()
+	row := tx.QueryRowContext(ctx, `SELECT `+taskColumns+` FROM tasks t WHERE lifecycle='ready' AND NOT EXISTS(SELECT 1 FROM claims c WHERE c.task_id=t.id AND c.released_at IS NULL) ORDER BY CASE priority WHEN 'urgent' THEN 4 WHEN 'high' THEN 3 WHEN 'normal' THEN 2 ELSE 1 END DESC, created_at ASC, id ASC LIMIT 1`)
+	task, err := scanTask(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.TaskView{}, domain.ErrNoEligible
+	}
+	if err != nil {
+		return domain.TaskView{}, err
+	}
+	claim, err := createClaim(ctx, tx, task.ID, identity, now)
+	if err != nil {
+		return domain.TaskView{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return domain.TaskView{}, err
+	}
+	return domain.NewTaskView(task, claim), nil
+}
+
+func createClaim(ctx context.Context, tx *sql.Tx, taskID int64, identity domain.AgentIdentity, now time.Time) (*domain.Claim, error) {
+	r, err := tx.ExecContext(ctx, `INSERT INTO claims(task_id,agent_name,instance_id,claimed_at,last_activity_at) VALUES(?,?,?,?,?)`, taskID, identity.AgentName, identity.InstanceID, formatTime(now), formatTime(now))
+	if err != nil {
+		return nil, err
+	}
+	id, err := r.LastInsertId()
+	if err != nil {
+		return nil, err
+	}
+	claim := &domain.Claim{ID: id, TaskID: taskID, AgentName: identity.AgentName, InstanceID: identity.InstanceID, ClaimedAt: now}
+	if err = insertActorEvent(ctx, tx, taskID, "task_claimed", "agent", identity.AgentName, map[string]any{"instance_id": identity.InstanceID}, now); err != nil {
+		return nil, err
+	}
+	return claim, nil
+}
+
+func (s *Store) ReleaseClaim(ctx context.Context, id int64, identity domain.AgentIdentity, reason string, now time.Time) (domain.TaskView, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.TaskView{}, err
+	}
+	defer tx.Rollback()
+	task, err := taskFromTx(ctx, tx, id)
+	if err != nil {
+		return domain.TaskView{}, err
+	}
+	claim, err := claimFromTx(ctx, tx, id)
+	if err != nil {
+		return domain.TaskView{}, err
+	}
+	if !owns(claim, identity) {
+		return domain.TaskView{}, fmt.Errorf("only the active owner can release the task: %w", domain.ErrConflict)
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE claims SET released_at=?,release_reason=? WHERE id=? AND released_at IS NULL`, formatTime(now), reason, claim.ID); err != nil {
+		return domain.TaskView{}, err
+	}
+	if err = insertActorEvent(ctx, tx, id, "task_released", "agent", identity.AgentName, map[string]any{"instance_id": identity.InstanceID, "reason": reason}, now); err != nil {
+		return domain.TaskView{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return domain.TaskView{}, err
+	}
+	return domain.NewTaskView(task, nil), nil
+}
+
+func (s *Store) UpdateProgress(ctx context.Context, id int64, percent int, message string, identity domain.AgentIdentity, now time.Time) (domain.TaskView, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.TaskView{}, err
+	}
+	defer tx.Rollback()
+	task, err := taskFromTx(ctx, tx, id)
+	if err != nil {
+		return domain.TaskView{}, err
+	}
+	claim, err := claimFromTx(ctx, tx, id)
+	if err != nil {
+		return domain.TaskView{}, err
+	}
+	if task.Lifecycle != domain.LifecycleReady || !owns(claim, identity) {
+		return domain.TaskView{}, fmt.Errorf("only the active owner of a ready task can update progress: %w", domain.ErrConflict)
+	}
+	phase := task.Phase
+	if message != "" {
+		phase = message
+	}
+	r, err := tx.ExecContext(ctx, `UPDATE tasks SET progress=?,phase=?,updated_at=?,version=version+1 WHERE id=? AND version=?`, percent, phase, formatTime(now), id, task.Version)
+	if err != nil {
+		return domain.TaskView{}, err
+	}
+	if n, _ := r.RowsAffected(); n != 1 {
+		return domain.TaskView{}, fmt.Errorf("task changed since it was read: %w", domain.ErrConflict)
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE claims SET last_activity_at=? WHERE id=?`, formatTime(now), claim.ID); err != nil {
+		return domain.TaskView{}, err
+	}
+	if err = insertActorEvent(ctx, tx, id, "task_progress", "agent", identity.AgentName, map[string]any{"instance_id": identity.InstanceID, "progress": percent, "message": message}, now); err != nil {
+		return domain.TaskView{}, err
+	}
+	task.Progress, task.Phase, task.UpdatedAt, task.Version = percent, phase, now, task.Version+1
+	if err = tx.Commit(); err != nil {
+		return domain.TaskView{}, err
+	}
+	return domain.NewTaskView(task, claim), nil
+}
+
+func (s *Store) CompleteClaimedTask(ctx context.Context, id int64, summary string, identity domain.AgentIdentity, now time.Time) (domain.TaskView, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.TaskView{}, err
+	}
+	defer tx.Rollback()
+	task, err := taskFromTx(ctx, tx, id)
+	if err != nil {
+		return domain.TaskView{}, err
+	}
+	claim, err := claimFromTx(ctx, tx, id)
+	if err != nil {
+		return domain.TaskView{}, err
+	}
+	if task.Lifecycle != domain.LifecycleReady || !owns(claim, identity) {
+		return domain.TaskView{}, fmt.Errorf("only the active owner can complete the task: %w", domain.ErrConflict)
+	}
+	r, err := tx.ExecContext(ctx, `UPDATE tasks SET lifecycle='done',progress=100,completion_summary=?,completed_at=?,cancelled_at=NULL,updated_at=?,version=version+1 WHERE id=? AND version=?`, summary, formatTime(now), formatTime(now), id, task.Version)
+	if err != nil {
+		return domain.TaskView{}, err
+	}
+	if n, _ := r.RowsAffected(); n != 1 {
+		return domain.TaskView{}, fmt.Errorf("task changed since it was read: %w", domain.ErrConflict)
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE claims SET released_at=?,release_reason='completed',last_activity_at=? WHERE id=? AND released_at IS NULL`, formatTime(now), formatTime(now), claim.ID); err != nil {
+		return domain.TaskView{}, err
+	}
+	if err = insertActorEvent(ctx, tx, id, "task_completed", "agent", identity.AgentName, map[string]any{"instance_id": identity.InstanceID, "comment": summary}, now); err != nil {
+		return domain.TaskView{}, err
+	}
+	task.Lifecycle, task.Progress, task.CompletionSummary, task.CompletedAt, task.UpdatedAt, task.Version = domain.LifecycleDone, 100, summary, &now, now, task.Version+1
+	if err = tx.Commit(); err != nil {
+		return domain.TaskView{}, err
+	}
+	return domain.NewTaskView(task, nil), nil
 }
 
 type scanner interface{ Scan(...any) error }
