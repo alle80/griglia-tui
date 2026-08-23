@@ -332,7 +332,7 @@ func (m Model) formView() string {
 	if m.form.saving {
 		lines = append(lines, "Saving…", "")
 	}
-	lines = append(lines, mutedStyle.Render("tab/↑/↓ field · enter next/save · esc cancel · Q quit"))
+	lines = append(lines, mutedStyle.Render("tab/↑/↓ field · enter next/save · esc cancel · Ctrl-C quit"))
 	return strings.Join(lines, "\n")
 }
 
