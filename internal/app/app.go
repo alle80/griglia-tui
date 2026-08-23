@@ -23,6 +23,9 @@ type TaskRepository interface {
 	AnswerQuestion(context.Context, int64, string, time.Time) (domain.Question, error)
 	AcknowledgeQuestion(context.Context, int64, domain.AgentIdentity, time.Time) (domain.Question, error)
 	ListQuestions(context.Context, int64, domain.QuestionFilter) ([]domain.Question, error)
+	AddDependency(context.Context, int64, int64, time.Time) (domain.DependencyView, error)
+	RemoveDependency(context.Context, int64, int64, time.Time) error
+	ListDependencies(context.Context, int64) ([]domain.DependencyView, error)
 }
 
 type EditTaskInput struct {
@@ -200,4 +203,19 @@ func (s *Service) AcknowledgeQuestion(ctx context.Context, questionID int64, ide
 
 func (s *Service) ListQuestions(ctx context.Context, taskID int64, filter domain.QuestionFilter) ([]domain.Question, error) {
 	return s.tasks.ListQuestions(ctx, taskID, filter)
+}
+
+func (s *Service) AddDependency(ctx context.Context, taskID, dependsOnTaskID int64) (domain.DependencyView, error) {
+	if taskID == dependsOnTaskID {
+		return domain.DependencyView{}, fmt.Errorf("a task cannot depend on itself: %w", domain.ErrInvalid)
+	}
+	return s.tasks.AddDependency(ctx, taskID, dependsOnTaskID, s.now().UTC())
+}
+
+func (s *Service) RemoveDependency(ctx context.Context, taskID, dependsOnTaskID int64) error {
+	return s.tasks.RemoveDependency(ctx, taskID, dependsOnTaskID, s.now().UTC())
+}
+
+func (s *Service) ListDependencies(ctx context.Context, taskID int64) ([]domain.DependencyView, error) {
+	return s.tasks.ListDependencies(ctx, taskID)
 }

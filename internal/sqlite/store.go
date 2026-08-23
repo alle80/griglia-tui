@@ -210,10 +210,11 @@ const listTaskColumns = `tasks.id,tasks.uid,tasks.title,tasks.description,tasks.
 
 const listTasksQuery = `SELECT ` + listTaskColumns + `,
 claims.id,claims.task_id,claims.agent_name,claims.instance_id,claims.claimed_at,claims.released_at,
-EXISTS(SELECT 1 FROM questions WHERE questions.task_id=tasks.id AND questions.blocking=1 AND questions.answered_at IS NULL)
+EXISTS(SELECT 1 FROM questions WHERE questions.task_id=tasks.id AND questions.blocking=1 AND questions.answered_at IS NULL),
+EXISTS(SELECT 1 FROM dependencies JOIN tasks prerequisite ON prerequisite.id=dependencies.depends_on_task_id WHERE dependencies.task_id=tasks.id AND prerequisite.lifecycle<>'done')
 FROM tasks
 LEFT JOIN claims ON claims.task_id=tasks.id AND claims.released_at IS NULL
-ORDER BY CASE priority WHEN 'urgent' THEN 4 WHEN 'high' THEN 3 WHEN 'normal' THEN 2 ELSE 1 END DESC, created_at ASC, tasks.id ASC`
+ORDER BY CASE tasks.priority WHEN 'urgent' THEN 4 WHEN 'high' THEN 3 WHEN 'normal' THEN 2 ELSE 1 END DESC, tasks.created_at ASC, tasks.id ASC`
 
 func (s *Store) ListTasks(ctx context.Context) ([]domain.TaskView, error) {
 	rows, err := s.db.QueryContext(ctx, listTasksQuery)
@@ -248,7 +249,11 @@ func (s *Store) GetTask(ctx context.Context, id int64) (domain.TaskView, error) 
 	if err != nil {
 		return domain.TaskView{}, err
 	}
-	return domain.NewTaskView(t, claim, pending), nil
+	blocked, err := hasUnsatisfiedDependencies(ctx, s.db, id)
+	if err != nil {
+		return domain.TaskView{}, err
+	}
+	return domain.NewTaskView(t, claim, pending, blocked), nil
 }
 
 func (s *Store) activeClaim(ctx context.Context, taskID int64) (*domain.Claim, error) {
@@ -311,14 +316,21 @@ func (s *Store) ClaimTask(ctx context.Context, id int64, identity domain.AgentId
 	if err != nil {
 		return domain.TaskView{}, err
 	}
+	blocked, err := hasUnsatisfiedDependencies(ctx, tx, task.ID)
+	if err != nil {
+		return domain.TaskView{}, err
+	}
 	if claim != nil {
 		if owns(claim, identity) {
-			return domain.NewTaskView(task, claim, pending), nil
+			return domain.NewTaskView(task, claim, pending, blocked), nil
 		}
 		return domain.TaskView{}, fmt.Errorf("task is already claimed: %w", domain.ErrConflict)
 	}
 	if task.Lifecycle != domain.LifecycleReady {
 		return domain.TaskView{}, fmt.Errorf("only ready tasks can be claimed: %w", domain.ErrConflict)
+	}
+	if blocked {
+		return domain.TaskView{}, fmt.Errorf("task has unsatisfied dependencies: %w", domain.ErrConflict)
 	}
 	claim, err = createClaim(ctx, tx, task.ID, identity, now)
 	if err != nil {
@@ -327,7 +339,7 @@ func (s *Store) ClaimTask(ctx context.Context, id int64, identity domain.AgentId
 	if err = tx.Commit(); err != nil {
 		return domain.TaskView{}, err
 	}
-	return domain.NewTaskView(task, claim, pending), nil
+	return domain.NewTaskView(task, claim, pending, blocked), nil
 }
 
 func (s *Store) ClaimNext(ctx context.Context, identity domain.AgentIdentity, now time.Time) (domain.TaskView, error) {
@@ -336,7 +348,7 @@ func (s *Store) ClaimNext(ctx context.Context, identity domain.AgentIdentity, no
 		return domain.TaskView{}, err
 	}
 	defer tx.Rollback()
-	row := tx.QueryRowContext(ctx, `SELECT `+taskColumns+` FROM tasks t WHERE lifecycle='ready' AND NOT EXISTS(SELECT 1 FROM claims c WHERE c.task_id=t.id AND c.released_at IS NULL) ORDER BY CASE priority WHEN 'urgent' THEN 4 WHEN 'high' THEN 3 WHEN 'normal' THEN 2 ELSE 1 END DESC, created_at ASC, id ASC LIMIT 1`)
+	row := tx.QueryRowContext(ctx, `SELECT `+taskColumns+` FROM tasks t WHERE lifecycle='ready' AND NOT EXISTS(SELECT 1 FROM claims c WHERE c.task_id=t.id AND c.released_at IS NULL) AND NOT EXISTS(SELECT 1 FROM dependencies d JOIN tasks p ON p.id=d.depends_on_task_id WHERE d.task_id=t.id AND p.lifecycle<>'done') ORDER BY CASE priority WHEN 'urgent' THEN 4 WHEN 'high' THEN 3 WHEN 'normal' THEN 2 ELSE 1 END DESC, created_at ASC, id ASC LIMIT 1`)
 	task, err := scanTask(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.TaskView{}, domain.ErrNoEligible
@@ -355,7 +367,8 @@ func (s *Store) ClaimNext(ctx context.Context, identity domain.AgentIdentity, no
 	if err = tx.Commit(); err != nil {
 		return domain.TaskView{}, err
 	}
-	return domain.NewTaskView(task, claim, pending), nil
+	// Eligibility already excluded unsatisfied dependencies in this transaction.
+	return domain.NewTaskView(task, claim, pending, false), nil
 }
 
 func createClaim(ctx context.Context, tx *sql.Tx, taskID int64, identity domain.AgentIdentity, now time.Time) (*domain.Claim, error) {
@@ -407,7 +420,11 @@ func (s *Store) ReleaseClaim(ctx context.Context, id int64, identity domain.Agen
 	if err = tx.Commit(); err != nil {
 		return domain.TaskView{}, err
 	}
-	return domain.NewTaskView(task, nil, false), nil
+	blocked, err := hasUnsatisfiedDependencies(ctx, s.db, id)
+	if err != nil {
+		return domain.TaskView{}, err
+	}
+	return domain.NewTaskView(task, nil, false, blocked), nil
 }
 
 func (s *Store) UpdateProgress(ctx context.Context, id int64, percent int, message string, identity domain.AgentIdentity, now time.Time) (domain.TaskView, error) {
@@ -452,7 +469,8 @@ func (s *Store) UpdateProgress(ctx context.Context, id int64, percent int, messa
 	if err = tx.Commit(); err != nil {
 		return domain.TaskView{}, err
 	}
-	return domain.NewTaskView(task, claim, pending), nil
+	// An actively claimed task cannot gain unsatisfied dependencies.
+	return domain.NewTaskView(task, claim, pending, false), nil
 }
 
 func (s *Store) CompleteClaimedTask(ctx context.Context, id int64, summary string, identity domain.AgentIdentity, now time.Time) (domain.TaskView, error) {
@@ -496,7 +514,7 @@ func (s *Store) CompleteClaimedTask(ctx context.Context, id int64, summary strin
 	if err = tx.Commit(); err != nil {
 		return domain.TaskView{}, err
 	}
-	return domain.NewTaskView(task, nil, false), nil
+	return domain.NewTaskView(task, nil, false, false), nil
 }
 
 type scanner interface{ Scan(...any) error }
@@ -518,9 +536,9 @@ func scanTaskView(row scanner) (domain.TaskView, error) {
 	var completed, cancelled sql.NullString
 	var claimID, claimTaskID sql.NullInt64
 	var agentName, instanceID, claimed, released sql.NullString
-	var pendingBlocking bool
+	var pendingBlocking, blockedByDependencies bool
 	destinations := taskScanDestinations(&task, &created, &updated, &completed, &cancelled)
-	destinations = append(destinations, &claimID, &claimTaskID, &agentName, &instanceID, &claimed, &released, &pendingBlocking)
+	destinations = append(destinations, &claimID, &claimTaskID, &agentName, &instanceID, &claimed, &released, &pendingBlocking, &blockedByDependencies)
 	if err := row.Scan(destinations...); err != nil {
 		return domain.TaskView{}, err
 	}
@@ -529,7 +547,7 @@ func scanTaskView(row scanner) (domain.TaskView, error) {
 		return domain.TaskView{}, err
 	}
 	if !claimID.Valid {
-		return domain.NewTaskView(parsedTask, nil, pendingBlocking), nil
+		return domain.NewTaskView(parsedTask, nil, pendingBlocking, blockedByDependencies), nil
 	}
 	if !claimTaskID.Valid || !agentName.Valid || !instanceID.Valid || !claimed.Valid {
 		return domain.TaskView{}, errors.New("active claim has null required columns")
@@ -546,7 +564,7 @@ func scanTaskView(row scanner) (domain.TaskView, error) {
 		}
 		claim.ReleasedAt = &releasedAt
 	}
-	return domain.NewTaskView(parsedTask, claim, pendingBlocking), nil
+	return domain.NewTaskView(parsedTask, claim, pendingBlocking, blockedByDependencies), nil
 }
 
 func taskScanDestinations(t *domain.Task, created, updated *string, completed, cancelled *sql.NullString) []any {

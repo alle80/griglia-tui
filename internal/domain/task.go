@@ -109,6 +109,7 @@ const (
 	OperationalAvailable       OperationalState = "available"
 	OperationalWorking         OperationalState = "working"
 	OperationalWaitingForHuman OperationalState = "waiting_for_human"
+	OperationalBlocked         OperationalState = "blocked"
 )
 
 type TaskView struct {
@@ -117,11 +118,15 @@ type TaskView struct {
 	ActiveClaim      *Claim
 }
 
-func NewTaskView(task Task, claim *Claim, unansweredBlocking bool) TaskView {
+// NewTaskView derives the operational state of a ready task from persisted
+// facts with precedence blocked > waiting_for_human > working > available.
+func NewTaskView(task Task, claim *Claim, unansweredBlocking, unsatisfiedDependencies bool) TaskView {
 	view := TaskView{Task: task, ActiveClaim: claim}
 	if task.Lifecycle == LifecycleReady {
 		state := OperationalAvailable
 		switch {
+		case unsatisfiedDependencies:
+			state = OperationalBlocked
 		case claim != nil && unansweredBlocking:
 			state = OperationalWaitingForHuman
 		case claim != nil:

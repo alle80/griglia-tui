@@ -41,16 +41,16 @@ func TestAgentIdentityAndOperationalState(t *testing.T) {
 		}
 	}
 	task := Task{Lifecycle: LifecycleReady}
-	view := NewTaskView(task, nil, false)
+	view := NewTaskView(task, nil, false, false)
 	if view.OperationalState == nil || *view.OperationalState != OperationalAvailable {
 		t.Fatalf("available=%+v", view)
 	}
 	claim := &Claim{AgentName: "codex", InstanceID: "one"}
-	view = NewTaskView(task, claim, false)
+	view = NewTaskView(task, claim, false, false)
 	if view.OperationalState == nil || *view.OperationalState != OperationalWorking || view.ActiveClaim != claim {
 		t.Fatalf("working=%+v", view)
 	}
-	if view = NewTaskView(Task{Lifecycle: LifecycleDone}, nil, false); view.OperationalState != nil {
+	if view = NewTaskView(Task{Lifecycle: LifecycleDone}, nil, false, false); view.OperationalState != nil {
 		t.Fatalf("terminal state=%+v", view)
 	}
 }
@@ -58,19 +58,19 @@ func TestAgentIdentityAndOperationalState(t *testing.T) {
 func TestWaitingForHumanDerivation(t *testing.T) {
 	task := Task{Lifecycle: LifecycleReady}
 	claim := &Claim{AgentName: "codex", InstanceID: "one"}
-	view := NewTaskView(task, claim, true)
+	view := NewTaskView(task, claim, true, false)
 	if view.OperationalState == nil || *view.OperationalState != OperationalWaitingForHuman {
 		t.Fatalf("waiting takes precedence over working, got %+v", view)
 	}
 	// An unanswered blocking question without a claim does not hide availability.
-	view = NewTaskView(task, nil, true)
+	view = NewTaskView(task, nil, true, false)
 	if view.OperationalState == nil || *view.OperationalState != OperationalAvailable {
 		t.Fatalf("available=%+v", view)
 	}
-	if view = NewTaskView(Task{Lifecycle: LifecycleDone}, nil, true); view.OperationalState != nil {
+	if view = NewTaskView(Task{Lifecycle: LifecycleDone}, nil, true, false); view.OperationalState != nil {
 		t.Fatalf("terminal state=%+v", view)
 	}
-	if view = NewTaskView(Task{Lifecycle: LifecycleBacklog}, nil, true); view.OperationalState != nil {
+	if view = NewTaskView(Task{Lifecycle: LifecycleBacklog}, nil, true, false); view.OperationalState != nil {
 		t.Fatalf("backlog state=%+v", view)
 	}
 }

@@ -21,10 +21,10 @@ func (r *memoryRepository) CreateTask(context.Context, domain.Task) (domain.Task
 	return domain.Task{}, nil
 }
 func (r *memoryRepository) ListTasks(context.Context) ([]domain.TaskView, error) {
-	return []domain.TaskView{domain.NewTaskView(r.task, nil, false)}, nil
+	return []domain.TaskView{domain.NewTaskView(r.task, nil, false, false)}, nil
 }
 func (r *memoryRepository) GetTask(context.Context, int64) (domain.TaskView, error) {
-	return domain.NewTaskView(r.task, nil, false), nil
+	return domain.NewTaskView(r.task, nil, false, false), nil
 }
 func (r *memoryRepository) EditTask(_ context.Context, task domain.Task, expected int64) (domain.Task, error) {
 	if r.conflict {
@@ -65,6 +65,15 @@ func (r *memoryRepository) AcknowledgeQuestion(_ context.Context, questionID int
 	return domain.Question{ID: questionID, AskedBy: identity, AcknowledgedAt: &now}, nil
 }
 func (r *memoryRepository) ListQuestions(context.Context, int64, domain.QuestionFilter) ([]domain.Question, error) {
+	return nil, nil
+}
+func (r *memoryRepository) AddDependency(_ context.Context, taskID, dependsOnTaskID int64, now time.Time) (domain.DependencyView, error) {
+	return domain.DependencyView{TaskID: taskID, DependsOnTaskID: dependsOnTaskID, CreatedAt: now}, nil
+}
+func (r *memoryRepository) RemoveDependency(context.Context, int64, int64, time.Time) error {
+	return nil
+}
+func (r *memoryRepository) ListDependencies(context.Context, int64) ([]domain.DependencyView, error) {
 	return nil, nil
 }
 
@@ -114,6 +123,21 @@ func TestQuestionInputValidation(t *testing.T) {
 	q, err := s.AskQuestion(ctx, 7, "Should malformed nodes be preserved?", true, identity)
 	if err != nil || q.TaskID != 7 || !q.Blocking || q.AskedBy != identity {
 		t.Fatalf("ask=%+v err=%v", q, err)
+	}
+}
+
+func TestDependencyInputValidation(t *testing.T) {
+	s := New(&memoryRepository{})
+	ctx := context.Background()
+	if _, err := s.AddDependency(ctx, 3, 3); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("self dependency err=%v", err)
+	}
+	d, err := s.AddDependency(ctx, 3, 4)
+	if err != nil || d.TaskID != 3 || d.DependsOnTaskID != 4 {
+		t.Fatalf("dependency=%+v err=%v", d, err)
+	}
+	if err = s.RemoveDependency(ctx, 3, 4); err != nil {
+		t.Fatal(err)
 	}
 }
 

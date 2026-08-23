@@ -39,6 +39,8 @@ func (m Model) render() string {
 		body = m.helpView()
 	case routeQuestions:
 		body = m.questionsView()
+	case routeDependencies:
+		body = m.dependenciesView()
 	default:
 		body = m.listView()
 	}
@@ -154,8 +156,17 @@ func (m Model) detailView() string {
 	if task.OperationalState != nil && *task.OperationalState == domain.OperationalWaitingForHuman {
 		lines = append(lines, "!! Waiting for human input — press w to view and answer questions")
 	}
+	if task.OperationalState != nil && *task.OperationalState == domain.OperationalBlocked {
+		lines = append(lines, "!! Blocked by unsatisfied dependencies — press b to inspect")
+	}
 	if task.ActiveClaim != nil {
 		lines = append(lines, "Agent: "+task.ActiveClaim.AgentName, "Instance: "+task.ActiveClaim.InstanceID)
+	}
+	if m.dependenciesTaskID == task.ID && len(m.dependencies) > 0 {
+		lines = append(lines, "", "Dependencies")
+		for _, dependency := range m.dependencies {
+			lines = append(lines, dependencyRow(dependency))
+		}
 	}
 	if task.Phase != "" {
 		lines = append(lines, "Phase: "+task.Phase)
@@ -167,12 +178,50 @@ func (m Model) detailView() string {
 	if m.actionErr != nil {
 		lines = append(lines, "", errorStyle.Render(m.actionErr.Error()))
 	}
-	lines = append(lines, "", mutedStyle.Render("e edit · a ready · d done · x cancel · w questions · q back · ? help"))
+	lines = append(lines, "", mutedStyle.Render("e edit · a ready · d done · x cancel · w questions · b dependencies · q back · ? help"))
+	return strings.Join(lines, "\n")
+}
+
+func dependencyRow(d domain.DependencyView) string {
+	label := "unsatisfied"
+	if d.Satisfied() {
+		label = "satisfied"
+	}
+	return fmt.Sprintf("#%-4d %-9s %-12s %s", d.DependsOnTaskID, d.Lifecycle, label, d.Title)
+}
+
+func (m Model) dependenciesView() string {
+	lines := []string{titleStyle.Render(fmt.Sprintf("DEPENDENCIES — TASK #%d", m.dependenciesTaskID)), ""}
+	switch {
+	case m.dependenciesLoad:
+		lines = append(lines, "Loading dependencies…")
+	case len(m.dependencies) == 0:
+		lines = append(lines, "No dependencies for this task.", mutedStyle.Render("Press n to add a prerequisite."))
+	default:
+		for i, dependency := range m.dependencies {
+			marker := "  "
+			if i == m.depSelected {
+				marker = "> "
+			}
+			row := truncate(marker+dependencyRow(dependency), max(16, m.width-2))
+			if i == m.depSelected {
+				row = selectedStyle.Render(row)
+			}
+			lines = append(lines, row)
+		}
+	}
+	if m.status != "" {
+		lines = append(lines, "", statusStyle.Render("✓ "+m.status))
+	}
+	if m.actionErr != nil {
+		lines = append(lines, "", errorStyle.Render(m.actionErr.Error()))
+	}
+	lines = append(lines, "", mutedStyle.Render("j/k move · n add · x remove · r refresh · q back · Q quit"))
 	return strings.Join(lines, "\n")
 }
 
 func (m Model) helpView() string {
-	return strings.Join([]string{titleStyle.Render("HELP"), "", "j / ↓       select next task", "k / ↑       select previous task", "enter       open task detail", "n           create a task", "e           edit selected task", "a           mark backlog task ready", "d           complete ready task", "x           cancel backlog/ready task", "w           view and answer task questions", "r           reload tasks", "?           open or close help", "q / esc     return to the list", "Q / ctrl+c  quit", "", mutedStyle.Render("Lifecycle actions are validated; errors are recoverable.")}, "\n")
+	return strings.Join([]string{titleStyle.Render("HELP"), "", "j / ↓       select next task", "k / ↑       select previous task", "enter       open task detail", "n           create a task", "e           edit selected task", "a           mark backlog task ready", "d           complete ready task", "x           cancel backlog/ready task", "w           view and answer task questions", "b           inspect and edit task dependencies", "r           reload tasks", "?           open or close help", "q / esc     return to the list", "Q / ctrl+c  quit", "", mutedStyle.Render("Lifecycle actions are validated; errors are recoverable.")}, "\n")
 }
 
 func questionKind(blocking bool) string {
@@ -231,6 +280,17 @@ func (m Model) questionsView() string {
 }
 
 func (m Model) formView() string {
+	if m.form.depending {
+		lines := []string{titleStyle.Render(fmt.Sprintf("ADD DEPENDENCY — TASK #%d", m.form.taskID)), "", selectedStyle.Render("Prerequisite task ID"), m.form.inputs[0].View(), ""}
+		if m.form.err != nil {
+			lines = append(lines, errorStyle.Render(m.form.err.Error()), "")
+		}
+		if m.form.saving {
+			lines = append(lines, "Saving…", "")
+		}
+		lines = append(lines, mutedStyle.Render("enter add dependency · esc back · Ctrl-C quit"))
+		return strings.Join(lines, "\n")
+	}
 	if m.form.answering {
 		lines := []string{titleStyle.Render(fmt.Sprintf("ANSWER QUESTION #%d", m.form.questionID)), "", m.form.questionBody, "", selectedStyle.Render("Answer"), m.form.inputs[0].View(), ""}
 		if m.form.err != nil {

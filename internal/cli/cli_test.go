@@ -292,6 +292,119 @@ func TestQuestionCommandErrors(t *testing.T) {
 	}
 }
 
+func TestDependencyFlowCLIAndJSON(t *testing.T) {
+	dir := t.TempDir()
+	if code, _, _ := run(t, dir, "init"); code != 0 {
+		t.Fatal(code)
+	}
+	if code, _, _ := run(t, dir, "task", "add", "Schema", "--lifecycle", "ready", "--priority", "high"); code != 0 {
+		t.Fatal(code)
+	}
+	if code, _, _ := run(t, dir, "task", "add", "Backend", "--lifecycle", "ready", "--priority", "urgent"); code != 0 {
+		t.Fatal(code)
+	}
+
+	code, out, stderr := run(t, dir, "task", "depend", "2", "--on", "1", "--json")
+	if code != 0 || stderr != "" || !strings.Contains(out, `"task_id":2`) || !strings.Contains(out, `"depends_on_task_id":1`) || !strings.Contains(out, `"satisfied":false`) {
+		t.Fatalf("depend: %d %q %q", code, out, stderr)
+	}
+	code, out, stderr = run(t, dir, "task", "show", "2", "--json")
+	if code != 0 || stderr != "" || !strings.Contains(out, `"operational_state":"blocked"`) {
+		t.Fatalf("blocked show: %d %q %q", code, out, stderr)
+	}
+	// Explicit claim of a blocked task is rejected.
+	code, out, stderr = run(t, dir, "task", "claim", "2", "--agent", "codex", "--instance", "session-a", "--json")
+	if code != 5 || stderr != "" || !strings.Contains(out, `"code":"conflict"`) {
+		t.Fatalf("claim blocked: %d %q %q", code, out, stderr)
+	}
+	// claim-next skips the urgent blocked task and picks the high one.
+	code, out, stderr = run(t, dir, "task", "claim-next", "--agent", "codex", "--instance", "session-a", "--json")
+	if code != 0 || stderr != "" || !strings.Contains(out, `"id":1`) || !strings.Contains(out, `"title":"Schema"`) {
+		t.Fatalf("claim-next: %d %q %q", code, out, stderr)
+	}
+	if code, _, _ = run(t, dir, "task", "done", "1", "--agent", "codex", "--instance", "session-a", "--comment", "done", "--json"); code != 0 {
+		t.Fatal(code)
+	}
+	// Completing the last prerequisite unblocks the dependent automatically.
+	code, out, stderr = run(t, dir, "task", "show", "2", "--json")
+	if code != 0 || stderr != "" || !strings.Contains(out, `"operational_state":"available"`) {
+		t.Fatalf("unblocked show: %d %q %q", code, out, stderr)
+	}
+	code, out, stderr = run(t, dir, "task", "dependencies", "2", "--json")
+	if code != 0 || stderr != "" || !strings.Contains(out, `"satisfied":true`) || !strings.Contains(out, `"lifecycle":"done"`) {
+		t.Fatalf("dependencies: %d %q %q", code, out, stderr)
+	}
+	code, out, stderr = run(t, dir, "task", "dependencies", "2")
+	if code != 0 || stderr != "" || !strings.Contains(out, "satisfied") || !strings.Contains(out, "Schema") {
+		t.Fatalf("human dependencies: %d %q %q", code, out, stderr)
+	}
+	code, out, stderr = run(t, dir, "task", "undepend", "2", "--on", "1", "--json")
+	if code != 0 || stderr != "" || !strings.Contains(out, `"depends_on_task_id":1`) {
+		t.Fatalf("undepend: %d %q %q", code, out, stderr)
+	}
+	code, out, stderr = run(t, dir, "task", "dependencies", "2", "--json")
+	if code != 0 || stderr != "" || !strings.Contains(out, `"dependencies":[]`) {
+		t.Fatalf("empty dependencies: %d %q %q", code, out, stderr)
+	}
+}
+
+func TestDependencyCommandErrors(t *testing.T) {
+	dir := t.TempDir()
+	if code, _, _ := run(t, dir, "init"); code != 0 {
+		t.Fatal(code)
+	}
+	for _, name := range []string{"A", "B", "C"} {
+		if code, _, _ := run(t, dir, "task", "add", name, "--lifecycle", "ready"); code != 0 {
+			t.Fatal(code)
+		}
+	}
+	if code, _, _ := run(t, dir, "task", "depend", "1", "--on", "2"); code != 0 {
+		t.Fatal(code)
+	}
+	if code, _, _ := run(t, dir, "task", "depend", "2", "--on", "3"); code != 0 {
+		t.Fatal(code)
+	}
+	// Cycle rejection while everything is still unclaimed.
+	code, out, stderr := run(t, dir, "task", "depend", "3", "--on", "1", "--json")
+	if code != 5 || stderr != "" || !strings.Contains(out, "cycle") {
+		t.Fatalf("cycle: %d %q %q", code, out, stderr)
+	}
+	if code, _, _ := run(t, dir, "task", "claim", "3", "--agent", "codex", "--instance", "one"); code != 0 {
+		t.Fatal(code)
+	}
+	for _, tc := range []struct {
+		args []string
+		code int
+		want string
+	}{
+		{[]string{"task", "depend", "1", "--on", "1"}, 2, `"code":"invalid_input"`},
+		{[]string{"task", "depend", "1"}, 2, "--on DEPENDENCY_ID is required"},
+		{[]string{"task", "depend", "1", "--on", "zero"}, 2, "dependency ID must be a positive integer"},
+		{[]string{"task", "depend", "99", "--on", "1"}, 4, `"code":"not_found"`},
+		{[]string{"task", "depend", "1", "--on", "99"}, 4, "prerequisite task not found"},
+		{[]string{"task", "depend", "3", "--on", "2"}, 5, "actively claimed"},
+		{[]string{"task", "undepend", "3", "--on", "2"}, 5, "actively claimed"},
+		{[]string{"task", "undepend", "99", "--on", "1"}, 4, `"code":"not_found"`},
+		{[]string{"task", "dependencies", "99"}, 4, `"code":"not_found"`},
+	} {
+		code, out, stderr := run(t, dir, append(tc.args, "--json")...)
+		if code != tc.code || stderr != "" || !strings.Contains(out, tc.want) {
+			t.Fatalf("args=%v code=%d out=%q err=%q", tc.args, code, out, stderr)
+		}
+	}
+	// Duplicate adds and repeated removals stay idempotent successes.
+	for _, args := range [][]string{
+		{"task", "depend", "1", "--on", "2", "--json"},
+		{"task", "undepend", "2", "--on", "3", "--json"},
+		{"task", "undepend", "2", "--on", "3", "--json"},
+	} {
+		code, out, stderr := run(t, dir, args...)
+		if code != 0 || stderr != "" || !strings.Contains(out, `"ok":true`) {
+			t.Fatalf("idempotent args=%v code=%d out=%q err=%q", args, code, out, stderr)
+		}
+	}
+}
+
 func TestAgentCommandValidationAndRelease(t *testing.T) {
 	dir := t.TempDir()
 	if code, _, _ := run(t, dir, "init"); code != 0 {

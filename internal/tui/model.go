@@ -19,6 +19,9 @@ type Service interface {
 	CancelTask(context.Context, int64, string) (domain.Task, error)
 	ListQuestions(context.Context, int64, domain.QuestionFilter) ([]domain.Question, error)
 	AnswerQuestion(context.Context, int64, string) (domain.Question, error)
+	ListDependencies(context.Context, int64) ([]domain.DependencyView, error)
+	AddDependency(context.Context, int64, int64) (domain.DependencyView, error)
+	RemoveDependency(context.Context, int64, int64) error
 }
 
 type route uint8
@@ -29,6 +32,7 @@ const (
 	routeForm
 	routeHelp
 	routeQuestions
+	routeDependencies
 )
 
 type tasksLoadedMsg struct {
@@ -58,6 +62,19 @@ type questionAnsweredMsg struct {
 	err      error
 }
 
+type dependenciesLoadedMsg struct {
+	taskID       int64
+	dependencies []domain.DependencyView
+	err          error
+}
+
+type dependencyMutatedMsg struct {
+	taskID          int64
+	dependsOnTaskID int64
+	action          string
+	err             error
+}
+
 type Model struct {
 	ctx                context.Context
 	service            Service
@@ -79,6 +96,12 @@ type Model struct {
 	questionsTaskID    int64
 	questionsFrom      route
 	questionsLoading   bool
+	dependencies       []domain.DependencyView
+	depSelected        int
+	depSelectedID      int64
+	dependenciesTaskID int64
+	dependenciesFrom   route
+	dependenciesLoad   bool
 }
 
 type formModel struct {
@@ -89,6 +112,7 @@ type formModel struct {
 	editing      bool
 	cancelling   bool
 	answering    bool
+	depending    bool
 	taskID       int64
 	questionID   int64
 	questionBody string
@@ -107,6 +131,14 @@ func newCancelForm(task domain.Task) formModel {
 	f := newForm()
 	f.cancelling, f.taskID = true, task.ID
 	f.inputs[0].Placeholder = "Optional cancellation reason"
+	f.inputs[0].CharLimit = 0
+	return f
+}
+
+func newDependForm(task domain.Task) formModel {
+	f := newForm()
+	f.depending, f.taskID = true, task.ID
+	f.inputs[0].Placeholder = "Prerequisite task ID"
 	f.inputs[0].CharLimit = 0
 	return f
 }
@@ -205,6 +237,27 @@ func (m Model) answerQuestion(questionID int64, answer string) tea.Cmd {
 	return func() tea.Msg {
 		question, err := m.service.AnswerQuestion(m.ctx, questionID, answer)
 		return questionAnsweredMsg{question: question, err: err}
+	}
+}
+
+func (m Model) loadDependencies(taskID int64) tea.Cmd {
+	return func() tea.Msg {
+		dependencies, err := m.service.ListDependencies(m.ctx, taskID)
+		return dependenciesLoadedMsg{taskID: taskID, dependencies: dependencies, err: err}
+	}
+}
+
+func (m Model) addDependency(taskID, dependsOnTaskID int64) tea.Cmd {
+	return func() tea.Msg {
+		dependency, err := m.service.AddDependency(m.ctx, taskID, dependsOnTaskID)
+		return dependencyMutatedMsg{taskID: taskID, dependsOnTaskID: dependency.DependsOnTaskID, action: "Added dependency", err: err}
+	}
+}
+
+func (m Model) removeDependency(taskID, dependsOnTaskID int64) tea.Cmd {
+	return func() tea.Msg {
+		err := m.service.RemoveDependency(m.ctx, taskID, dependsOnTaskID)
+		return dependencyMutatedMsg{taskID: taskID, dependsOnTaskID: dependsOnTaskID, action: "Removed dependency", err: err}
 	}
 }
 
