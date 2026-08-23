@@ -166,6 +166,8 @@ func key(value string) tea.KeyPressMsg {
 		return tea.KeyPressMsg(tea.Key{Code: tea.KeyUp})
 	case "esc":
 		return tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape})
+	case "tab":
+		return tea.KeyPressMsg(tea.Key{Code: tea.KeyTab})
 	default:
 		return tea.KeyPressMsg(tea.Key{Code: []rune(value)[0], Text: value})
 	}

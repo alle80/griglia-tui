@@ -106,6 +106,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.route, m.form = routeDependencies, newForm()
 		m.dependenciesLoad, m.loading = true, true
 		return m, tea.Batch(m.loadDependencies(m.dependenciesTaskID), m.loadTasks())
+	case tea.PasteMsg:
+		return m.updatePaste(msg)
 	case tea.KeyPressMsg:
 		if matches(msg, keys.ForceQuit) || (m.route != routeForm && matches(msg, keys.Quit)) {
 			return m, tea.Quit
@@ -121,6 +123,24 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateRoute(msg)
 	}
 	return m, nil
+}
+
+// updatePaste delivers bracketed-paste text to the focused form input, so
+// pasted content is never interpreted as key presses. Outside a form there is
+// no text entry and the paste is discarded.
+func (m Model) updatePaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
+	if m.route != routeForm || m.form.saving {
+		return m, nil
+	}
+	// Single-line inputs replace each newline with a space; collapse CRLF
+	// pairs first so a Windows-style paste does not produce double spaces.
+	msg.Content = strings.ReplaceAll(msg.Content, "\r\n", "\n")
+	var cmd tea.Cmd
+	m.form.inputs[m.form.focus], cmd = m.form.inputs[m.form.focus].Update(msg)
+	if m.form.err != nil {
+		m.form.err = nil
+	}
+	return m, cmd
 }
 
 func (m Model) updateRoute(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
