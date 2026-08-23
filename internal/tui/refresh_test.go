@@ -287,6 +287,37 @@ func TestAutoRefreshUpdatesDependenciesInDetailAndDependenciesViews(t *testing.T
 	}
 }
 
+func TestDetailAutoRefreshTargetsDisplayedTaskNotDependenciesTaskID(t *testing.T) {
+	// dependenciesTaskID can lag behind the detail view (zero, or pointing at
+	// a task inspected earlier); the automatic refresh must request the
+	// dependencies of the task actually on screen.
+	for name, staleID := range map[string]int64{"zero": 0, "other-task": 7} {
+		t.Run(name, func(t *testing.T) {
+			service := &fakeService{
+				tasks:        []domain.Task{makeTask(1, "Displayed", domain.PriorityHigh, domain.LifecycleReady), makeTask(7, "Other", domain.PriorityLow, domain.LifecycleReady)},
+				dependencies: []domain.DependencyView{makeDependency(1, 4, "Mine", domain.LifecycleDone), makeDependency(7, 9, "Theirs", domain.LifecycleReady)},
+			}
+			model := load(t, New(context.Background(), service))
+			model.route = routeDetail
+			model.dependenciesTaskID = staleID
+			model.dependencies = nil
+			service.depListCalls = nil
+			model, cmd := update(t, model, tickMsg{})
+			model = runCmd(t, model, cmd)
+			if len(service.depListCalls) != 1 || service.depListCalls[0] != 1 {
+				t.Fatalf("dependency requests=%v, want exactly [1]", service.depListCalls)
+			}
+			if model.dependenciesTaskID != 1 {
+				t.Fatalf("dependenciesTaskID=%d, want 1", model.dependenciesTaskID)
+			}
+			view := model.render()
+			if !strings.Contains(view, "Mine") || strings.Contains(view, "Theirs") {
+				t.Fatalf("detail shows wrong dependencies: %q", view)
+			}
+		})
+	}
+}
+
 func TestStaleBackgroundResultsForOtherTasksAreIgnored(t *testing.T) {
 	service := &fakeService{tasks: []domain.Task{makeTask(5, "Parser", domain.PriorityHigh, domain.LifecycleReady)}, questions: []domain.Question{makeQuestion(1, 5, "Q", true)}}
 	model := load(t, New(context.Background(), service))

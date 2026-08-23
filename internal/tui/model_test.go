@@ -30,6 +30,7 @@ type fakeService struct {
 	qListErr     error
 	answerErr    error
 	dependencies []domain.DependencyView
+	depListCalls []int64
 	depErr       error
 }
 
@@ -111,6 +112,7 @@ func (f *fakeService) AnswerQuestion(_ context.Context, questionID int64, answer
 }
 
 func (f *fakeService) ListDependencies(_ context.Context, taskID int64) ([]domain.DependencyView, error) {
+	f.depListCalls = append(f.depListCalls, taskID)
 	dependencies := make([]domain.DependencyView, 0, len(f.dependencies))
 	for _, d := range f.dependencies {
 		if d.TaskID == taskID {

@@ -226,7 +226,18 @@ func (m Model) autoRefresh() (Model, tea.Cmd) {
 	switch m.route {
 	case routeQuestions:
 		commands = append(commands, m.refreshQuestions(m.questionsTaskID))
-	case routeDetail, routeDependencies:
+	case routeDetail:
+		// The detail route displays the selected task, which
+		// dependenciesTaskID is not guaranteed to match. Retarget it so the
+		// result is not dropped as stale, and shed rows of the old target.
+		if len(m.tasks) > 0 {
+			id := m.tasks[m.selected].ID
+			if id != m.dependenciesTaskID {
+				m.dependenciesTaskID, m.dependencies = id, nil
+			}
+			commands = append(commands, m.refreshDependencies(id))
+		}
+	case routeDependencies:
 		commands = append(commands, m.refreshDependencies(m.dependenciesTaskID))
 	}
 	return m, tea.Batch(commands...)
