@@ -17,6 +17,8 @@ type Service interface {
 	MarkReady(context.Context, int64) (domain.Task, error)
 	CompleteTask(context.Context, int64) (domain.Task, error)
 	CancelTask(context.Context, int64, string) (domain.Task, error)
+	ListQuestions(context.Context, int64, domain.QuestionFilter) ([]domain.Question, error)
+	AnswerQuestion(context.Context, int64, string) (domain.Question, error)
 }
 
 type route uint8
@@ -26,6 +28,7 @@ const (
 	routeDetail
 	routeForm
 	routeHelp
+	routeQuestions
 )
 
 type tasksLoadedMsg struct {
@@ -44,31 +47,51 @@ type taskMutatedMsg struct {
 	err    error
 }
 
+type questionsLoadedMsg struct {
+	taskID    int64
+	questions []domain.Question
+	err       error
+}
+
+type questionAnsweredMsg struct {
+	question domain.Question
+	err      error
+}
+
 type Model struct {
-	ctx        context.Context
-	service    Service
-	route      route
-	previous   route
-	tasks      []domain.TaskView
-	selected   int
-	selectedID int64
-	loading    bool
-	err        error
-	status     string
-	actionErr  error
-	width      int
-	height     int
-	form       formModel
+	ctx                context.Context
+	service            Service
+	route              route
+	previous           route
+	tasks              []domain.TaskView
+	selected           int
+	selectedID         int64
+	loading            bool
+	err                error
+	status             string
+	actionErr          error
+	width              int
+	height             int
+	form               formModel
+	questions          []domain.Question
+	questionSelected   int
+	questionSelectedID int64
+	questionsTaskID    int64
+	questionsFrom      route
+	questionsLoading   bool
 }
 
 type formModel struct {
-	inputs     [3]textinput.Model
-	focus      int
-	err        error
-	saving     bool
-	editing    bool
-	cancelling bool
-	taskID     int64
+	inputs       [3]textinput.Model
+	focus        int
+	err          error
+	saving       bool
+	editing      bool
+	cancelling   bool
+	answering    bool
+	taskID       int64
+	questionID   int64
+	questionBody string
 }
 
 func newEditForm(task domain.Task) formModel {
@@ -85,6 +108,17 @@ func newCancelForm(task domain.Task) formModel {
 	f.cancelling, f.taskID = true, task.ID
 	f.inputs[0].Placeholder = "Optional cancellation reason"
 	f.inputs[0].CharLimit = 0
+	return f
+}
+
+func newAnswerForm(question domain.Question) formModel {
+	f := newForm()
+	f.answering, f.questionID, f.questionBody = true, question.ID, question.Body
+	f.inputs[0].Placeholder = "Answer"
+	f.inputs[0].CharLimit = domain.MaxQuestionTextLength
+	if question.Answer != nil {
+		f.inputs[0].SetValue(*question.Answer)
+	}
 	return f
 }
 
@@ -157,6 +191,20 @@ func (m Model) cancelTask(id int64, reason string) tea.Cmd {
 	return func() tea.Msg {
 		task, err := m.service.CancelTask(m.ctx, id, reason)
 		return taskMutatedMsg{task: task, action: "Cancelled", err: err}
+	}
+}
+
+func (m Model) loadQuestions(taskID int64) tea.Cmd {
+	return func() tea.Msg {
+		questions, err := m.service.ListQuestions(m.ctx, taskID, domain.QuestionsAll)
+		return questionsLoadedMsg{taskID: taskID, questions: questions, err: err}
+	}
+}
+
+func (m Model) answerQuestion(questionID int64, answer string) tea.Cmd {
+	return func() tea.Msg {
+		question, err := m.service.AnswerQuestion(m.ctx, questionID, answer)
+		return questionAnsweredMsg{question: question, err: err}
 	}
 }
 

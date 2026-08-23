@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,10 +21,10 @@ func (r *memoryRepository) CreateTask(context.Context, domain.Task) (domain.Task
 	return domain.Task{}, nil
 }
 func (r *memoryRepository) ListTasks(context.Context) ([]domain.TaskView, error) {
-	return []domain.TaskView{domain.NewTaskView(r.task, nil)}, nil
+	return []domain.TaskView{domain.NewTaskView(r.task, nil, false)}, nil
 }
 func (r *memoryRepository) GetTask(context.Context, int64) (domain.TaskView, error) {
-	return domain.NewTaskView(r.task, nil), nil
+	return domain.NewTaskView(r.task, nil, false), nil
 }
 func (r *memoryRepository) EditTask(_ context.Context, task domain.Task, expected int64) (domain.Task, error) {
 	if r.conflict {
@@ -54,6 +55,18 @@ func (r *memoryRepository) UpdateProgress(context.Context, int64, int, string, d
 func (r *memoryRepository) CompleteClaimedTask(context.Context, int64, string, domain.AgentIdentity, time.Time) (domain.TaskView, error) {
 	return domain.TaskView{}, nil
 }
+func (r *memoryRepository) AskQuestion(_ context.Context, taskID int64, body string, blocking bool, identity domain.AgentIdentity, now time.Time) (domain.Question, error) {
+	return domain.Question{ID: 1, TaskID: taskID, Body: body, Blocking: blocking, AskedBy: identity, AskedAt: now}, nil
+}
+func (r *memoryRepository) AnswerQuestion(_ context.Context, questionID int64, answer string, now time.Time) (domain.Question, error) {
+	return domain.Question{ID: questionID, Answer: &answer, AnsweredAt: &now}, nil
+}
+func (r *memoryRepository) AcknowledgeQuestion(_ context.Context, questionID int64, identity domain.AgentIdentity, now time.Time) (domain.Question, error) {
+	return domain.Question{ID: questionID, AskedBy: identity, AcknowledgedAt: &now}, nil
+}
+func (r *memoryRepository) ListQuestions(context.Context, int64, domain.QuestionFilter) ([]domain.Question, error) {
+	return nil, nil
+}
 
 func TestEditAndLifecycleSemantics(t *testing.T) {
 	base := time.Date(2026, 8, 23, 10, 0, 0, 0, time.UTC)
@@ -76,6 +89,31 @@ func TestEditAndLifecycleSemantics(t *testing.T) {
 	}
 	if _, err = s.CancelTask(context.Background(), 1, "late"); !errors.Is(err, domain.ErrConflict) {
 		t.Fatalf("terminal cancel err=%v", err)
+	}
+}
+
+func TestQuestionInputValidation(t *testing.T) {
+	s := New(&memoryRepository{})
+	ctx := context.Background()
+	identity := domain.AgentIdentity{AgentName: "codex", InstanceID: "one"}
+	long := strings.Repeat("x", domain.MaxQuestionTextLength+1)
+	if _, err := s.AskQuestion(ctx, 1, "valid?", true, domain.AgentIdentity{}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("missing identity err=%v", err)
+	}
+	for _, body := range []string{"", "   ", long} {
+		if _, err := s.AskQuestion(ctx, 1, body, true, identity); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("body=%q err=%v", body, err)
+		}
+		if _, err := s.AnswerQuestion(ctx, 1, body); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("answer=%q err=%v", body, err)
+		}
+	}
+	if _, err := s.AcknowledgeQuestion(ctx, 1, domain.AgentIdentity{AgentName: "codex"}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("partial identity err=%v", err)
+	}
+	q, err := s.AskQuestion(ctx, 7, "Should malformed nodes be preserved?", true, identity)
+	if err != nil || q.TaskID != 7 || !q.Blocking || q.AskedBy != identity {
+		t.Fatalf("ask=%+v err=%v", q, err)
 	}
 }
 

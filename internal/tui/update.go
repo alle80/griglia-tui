@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -50,6 +51,33 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.form = newForm()
 		m.loading = true
 		return m, m.loadTasks()
+	case questionsLoadedMsg:
+		if msg.taskID != m.questionsTaskID {
+			return m, nil
+		}
+		m.questionsLoading = false
+		if msg.err != nil {
+			m.actionErr = msg.err
+			return m, nil
+		}
+		m.actionErr = nil
+		m.questions = msg.questions
+		m.restoreQuestionSelection()
+		return m, nil
+	case questionAnsweredMsg:
+		m.form.saving = false
+		if msg.err != nil {
+			if m.route == routeForm {
+				m.form.err = msg.err
+			} else {
+				m.actionErr = msg.err
+			}
+			return m, nil
+		}
+		m.questionSelectedID, m.status, m.actionErr = msg.question.ID, fmt.Sprintf("Answered question #%d", msg.question.ID), nil
+		m.route, m.form = routeQuestions, newForm()
+		m.questionsLoading, m.loading = true, true
+		return m, tea.Batch(m.loadQuestions(m.questionsTaskID), m.loadTasks())
 	case tea.KeyPressMsg:
 		if matches(msg, keys.ForceQuit) || (m.route != routeForm && matches(msg, keys.Quit)) {
 			return m, tea.Quit
@@ -88,9 +116,41 @@ func (m Model) updateRoute(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case routeForm:
 		return m.updateForm(msg)
+	case routeQuestions:
+		return m.updateQuestions(msg)
 	default:
 		return m, nil
 	}
+}
+
+func (m Model) updateQuestions(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case matches(msg, keys.Back):
+		m.route, m.actionErr = m.questionsFrom, nil
+		return m, nil
+	case matches(msg, keys.Down) && len(m.questions) > 0:
+		if m.questionSelected < len(m.questions)-1 {
+			m.questionSelected++
+		}
+		m.questionSelectedID = m.questions[m.questionSelected].ID
+	case matches(msg, keys.Up) && len(m.questions) > 0:
+		if m.questionSelected > 0 {
+			m.questionSelected--
+		}
+		m.questionSelectedID = m.questions[m.questionSelected].ID
+	case matches(msg, keys.Open) && len(m.questions) > 0:
+		question := m.questions[m.questionSelected]
+		if question.Acknowledged() {
+			return m, nil
+		}
+		m.form = newAnswerForm(question)
+		m.sizeForm()
+		m.route = routeForm
+	case matches(msg, keys.Refresh):
+		m.questionsLoading, m.loading, m.actionErr = true, true, nil
+		return m, tea.Batch(m.loadQuestions(m.questionsTaskID), m.loadTasks())
+	}
+	return m, nil
 }
 
 func (m Model) updateList(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -111,7 +171,7 @@ func (m Model) updateList(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.form = newForm()
 		m.sizeForm()
 		m.route = routeForm
-	case msg.String() == "r":
+	case matches(msg, keys.Refresh):
 		m.loading, m.err = true, nil
 		return m, m.loadTasks()
 	default:
@@ -138,18 +198,44 @@ func (m Model) updateTaskAction(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.form = newCancelForm(task.Task)
 		m.sizeForm()
 		m.route = routeForm
+	case matches(msg, keys.Questions):
+		m.questionsFrom, m.route = m.route, routeQuestions
+		m.questionsTaskID, m.questions = task.ID, nil
+		m.questionSelected, m.questionSelectedID = 0, 0
+		m.questionsLoading, m.actionErr = true, nil
+		return m, m.loadQuestions(task.ID)
 	}
 	return m, nil
 }
 
 func (m Model) updateForm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "esc" {
-		m.route = routeList
+		if m.form.answering {
+			m.route = routeQuestions
+		} else {
+			m.route = routeList
+		}
 		m.form = newForm()
 		return m, nil
 	}
 	if m.form.saving {
 		return m, nil
+	}
+	if m.form.answering {
+		if msg.String() == "enter" {
+			if strings.TrimSpace(m.form.inputs[0].Value()) == "" {
+				m.form.err = fmt.Errorf("answer must not be empty")
+				return m, nil
+			}
+			m.form.err, m.form.saving = nil, true
+			return m, m.answerQuestion(m.form.questionID, m.form.inputs[0].Value())
+		}
+		var cmd tea.Cmd
+		m.form.inputs[0], cmd = m.form.inputs[0].Update(msg)
+		if m.form.err != nil {
+			m.form.err = nil
+		}
+		return m, cmd
 	}
 	if m.form.cancelling {
 		if msg.String() == "enter" {
@@ -200,6 +286,23 @@ func (f *formModel) moveFocus(delta int) {
 	f.inputs[f.focus].Blur()
 	f.focus = (f.focus + delta + len(f.inputs)) % len(f.inputs)
 	f.inputs[f.focus].Focus()
+}
+
+func (m *Model) restoreQuestionSelection() {
+	if len(m.questions) == 0 {
+		m.questionSelected, m.questionSelectedID = 0, 0
+		return
+	}
+	for i, question := range m.questions {
+		if question.ID == m.questionSelectedID {
+			m.questionSelected = i
+			return
+		}
+	}
+	if m.questionSelected >= len(m.questions) {
+		m.questionSelected = len(m.questions) - 1
+	}
+	m.questionSelectedID = m.questions[m.questionSelected].ID
 }
 
 func (m *Model) restoreSelection() {

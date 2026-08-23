@@ -37,6 +37,8 @@ func (m Model) render() string {
 		body = m.formView()
 	case routeHelp:
 		body = m.helpView()
+	case routeQuestions:
+		body = m.questionsView()
 	default:
 		body = m.listView()
 	}
@@ -80,7 +82,7 @@ func (m Model) listView() string {
 	if m.actionErr != nil {
 		lines = append(lines, "", errorStyle.Render(m.actionErr.Error()))
 	}
-	lines = append(lines, "", mutedStyle.Render("j/k move · enter detail · n new · e edit · ? help · Q quit"))
+	lines = append(lines, "", mutedStyle.Render("j/k move · enter detail · n new · e edit · w questions · ? help · Q quit"))
 	return strings.Join(lines, "\n")
 }
 
@@ -115,8 +117,8 @@ func (m Model) taskRow(task domain.TaskView, selected bool) []string {
 		}
 		return []string{first, mutedStyle.Render(second)}
 	}
-	left := truncate(fmt.Sprintf("%s#%-4d %s", marker, task.ID, task.Title), max(16, m.width-28))
-	row := fmt.Sprintf("%-*s  %-11s %s", max(16, m.width-28), left, state, priority)
+	left := truncate(fmt.Sprintf("%s#%-4d %s", marker, task.ID, task.Title), max(16, m.width-36))
+	row := fmt.Sprintf("%-*s  %-19s %s", max(16, m.width-36), left, state, priority)
 	if selected {
 		row = selectedStyle.Render(row)
 	}
@@ -149,6 +151,9 @@ func (m Model) detailView() string {
 		state = string(*task.OperationalState)
 	}
 	lines := []string{titleStyle.Render(fmt.Sprintf("TASK #%d", task.ID)), "", task.Title, "", "Lifecycle: " + string(task.Lifecycle), "Operational state: " + state, "Priority: " + string(task.Priority), fmt.Sprintf("Progress: %d%%", task.Progress)}
+	if task.OperationalState != nil && *task.OperationalState == domain.OperationalWaitingForHuman {
+		lines = append(lines, "!! Waiting for human input — press w to view and answer questions")
+	}
 	if task.ActiveClaim != nil {
 		lines = append(lines, "Agent: "+task.ActiveClaim.AgentName, "Instance: "+task.ActiveClaim.InstanceID)
 	}
@@ -162,15 +167,81 @@ func (m Model) detailView() string {
 	if m.actionErr != nil {
 		lines = append(lines, "", errorStyle.Render(m.actionErr.Error()))
 	}
-	lines = append(lines, "", mutedStyle.Render("e edit · a ready · d done · x cancel · q back · ? help"))
+	lines = append(lines, "", mutedStyle.Render("e edit · a ready · d done · x cancel · w questions · q back · ? help"))
 	return strings.Join(lines, "\n")
 }
 
 func (m Model) helpView() string {
-	return strings.Join([]string{titleStyle.Render("HELP"), "", "j / ↓       select next task", "k / ↑       select previous task", "enter       open task detail", "n           create a task", "e           edit selected task", "a           mark backlog task ready", "d           complete ready task", "x           cancel backlog/ready task", "r           reload tasks", "?           open or close help", "q / esc     return to the list", "Q / ctrl+c  quit", "", mutedStyle.Render("Lifecycle actions are validated; errors are recoverable.")}, "\n")
+	return strings.Join([]string{titleStyle.Render("HELP"), "", "j / ↓       select next task", "k / ↑       select previous task", "enter       open task detail", "n           create a task", "e           edit selected task", "a           mark backlog task ready", "d           complete ready task", "x           cancel backlog/ready task", "w           view and answer task questions", "r           reload tasks", "?           open or close help", "q / esc     return to the list", "Q / ctrl+c  quit", "", mutedStyle.Render("Lifecycle actions are validated; errors are recoverable.")}, "\n")
+}
+
+func questionKind(blocking bool) string {
+	if blocking {
+		return "[BLOCKING]"
+	}
+	return "[info]"
+}
+
+func questionState(q domain.Question) string {
+	switch {
+	case q.Acknowledged():
+		return "acknowledged"
+	case q.Answered():
+		return "answered"
+	default:
+		return "unanswered"
+	}
+}
+
+func (m Model) questionsView() string {
+	lines := []string{titleStyle.Render(fmt.Sprintf("QUESTIONS — TASK #%d", m.questionsTaskID)), ""}
+	switch {
+	case m.questionsLoading:
+		lines = append(lines, "Loading questions…")
+	case len(m.questions) == 0:
+		lines = append(lines, "No questions for this task.")
+	default:
+		for i, question := range m.questions {
+			marker := "  "
+			if i == m.questionSelected {
+				marker = "> "
+			}
+			row := truncate(fmt.Sprintf("%s#%-4d %-10s %-12s %s", marker, question.ID, questionKind(question.Blocking), questionState(question), question.Body), max(16, m.width-2))
+			if i == m.questionSelected {
+				row = selectedStyle.Render(row)
+			}
+			lines = append(lines, row)
+		}
+		selected := m.questions[m.questionSelected]
+		lines = append(lines, "", mutedStyle.Render(strings.Repeat("─", max(1, m.width-2))), "Question: "+selected.Body)
+		if selected.Answer != nil {
+			lines = append(lines, "Answer: "+*selected.Answer)
+		} else {
+			lines = append(lines, "Answer: —")
+		}
+	}
+	if m.status != "" {
+		lines = append(lines, "", statusStyle.Render("✓ "+m.status))
+	}
+	if m.actionErr != nil {
+		lines = append(lines, "", errorStyle.Render(m.actionErr.Error()))
+	}
+	lines = append(lines, "", mutedStyle.Render("j/k move · enter answer · r refresh · q back · Q quit"))
+	return strings.Join(lines, "\n")
 }
 
 func (m Model) formView() string {
+	if m.form.answering {
+		lines := []string{titleStyle.Render(fmt.Sprintf("ANSWER QUESTION #%d", m.form.questionID)), "", m.form.questionBody, "", selectedStyle.Render("Answer"), m.form.inputs[0].View(), ""}
+		if m.form.err != nil {
+			lines = append(lines, errorStyle.Render(m.form.err.Error()), "")
+		}
+		if m.form.saving {
+			lines = append(lines, "Saving…", "")
+		}
+		lines = append(lines, mutedStyle.Render("enter save answer · esc back · Ctrl-C quit"))
+		return strings.Join(lines, "\n")
+	}
 	if m.form.cancelling {
 		lines := []string{titleStyle.Render("CANCEL TASK"), "", selectedStyle.Render("Reason (optional)"), m.form.inputs[0].View(), ""}
 		if m.form.err != nil {

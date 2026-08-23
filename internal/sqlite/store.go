@@ -209,7 +209,8 @@ const taskColumns = `id,uid,title,description,lifecycle,priority,progress,phase,
 const listTaskColumns = `tasks.id,tasks.uid,tasks.title,tasks.description,tasks.lifecycle,tasks.priority,tasks.progress,tasks.phase,tasks.completion_summary,tasks.created_at,tasks.updated_at,tasks.completed_at,tasks.cancelled_at,tasks.version`
 
 const listTasksQuery = `SELECT ` + listTaskColumns + `,
-claims.id,claims.task_id,claims.agent_name,claims.instance_id,claims.claimed_at,claims.released_at
+claims.id,claims.task_id,claims.agent_name,claims.instance_id,claims.claimed_at,claims.released_at,
+EXISTS(SELECT 1 FROM questions WHERE questions.task_id=tasks.id AND questions.blocking=1 AND questions.answered_at IS NULL)
 FROM tasks
 LEFT JOIN claims ON claims.task_id=tasks.id AND claims.released_at IS NULL
 ORDER BY CASE priority WHEN 'urgent' THEN 4 WHEN 'high' THEN 3 WHEN 'normal' THEN 2 ELSE 1 END DESC, created_at ASC, tasks.id ASC`
@@ -243,7 +244,11 @@ func (s *Store) GetTask(ctx context.Context, id int64) (domain.TaskView, error) 
 	if err != nil {
 		return domain.TaskView{}, err
 	}
-	return domain.NewTaskView(t, claim), nil
+	pending, err := hasUnansweredBlocking(ctx, s.db, id)
+	if err != nil {
+		return domain.TaskView{}, err
+	}
+	return domain.NewTaskView(t, claim, pending), nil
 }
 
 func (s *Store) activeClaim(ctx context.Context, taskID int64) (*domain.Claim, error) {
@@ -302,9 +307,13 @@ func (s *Store) ClaimTask(ctx context.Context, id int64, identity domain.AgentId
 	if err != nil {
 		return domain.TaskView{}, err
 	}
+	pending, err := hasUnansweredBlocking(ctx, tx, task.ID)
+	if err != nil {
+		return domain.TaskView{}, err
+	}
 	if claim != nil {
 		if owns(claim, identity) {
-			return domain.NewTaskView(task, claim), nil
+			return domain.NewTaskView(task, claim, pending), nil
 		}
 		return domain.TaskView{}, fmt.Errorf("task is already claimed: %w", domain.ErrConflict)
 	}
@@ -318,7 +327,7 @@ func (s *Store) ClaimTask(ctx context.Context, id int64, identity domain.AgentId
 	if err = tx.Commit(); err != nil {
 		return domain.TaskView{}, err
 	}
-	return domain.NewTaskView(task, claim), nil
+	return domain.NewTaskView(task, claim, pending), nil
 }
 
 func (s *Store) ClaimNext(ctx context.Context, identity domain.AgentIdentity, now time.Time) (domain.TaskView, error) {
@@ -339,10 +348,14 @@ func (s *Store) ClaimNext(ctx context.Context, identity domain.AgentIdentity, no
 	if err != nil {
 		return domain.TaskView{}, err
 	}
+	pending, err := hasUnansweredBlocking(ctx, tx, task.ID)
+	if err != nil {
+		return domain.TaskView{}, err
+	}
 	if err = tx.Commit(); err != nil {
 		return domain.TaskView{}, err
 	}
-	return domain.NewTaskView(task, claim), nil
+	return domain.NewTaskView(task, claim, pending), nil
 }
 
 func createClaim(ctx context.Context, tx *sql.Tx, taskID int64, identity domain.AgentIdentity, now time.Time) (*domain.Claim, error) {
@@ -378,6 +391,13 @@ func (s *Store) ReleaseClaim(ctx context.Context, id int64, identity domain.Agen
 	if !owns(claim, identity) {
 		return domain.TaskView{}, fmt.Errorf("only the active owner can release the task: %w", domain.ErrConflict)
 	}
+	pending, err := hasUnansweredBlocking(ctx, tx, id)
+	if err != nil {
+		return domain.TaskView{}, err
+	}
+	if pending {
+		return domain.TaskView{}, fmt.Errorf("task has unanswered blocking questions: %w", domain.ErrConflict)
+	}
 	if _, err = tx.ExecContext(ctx, `UPDATE claims SET released_at=?,release_reason=? WHERE id=? AND released_at IS NULL`, formatTime(now), reason, claim.ID); err != nil {
 		return domain.TaskView{}, err
 	}
@@ -387,7 +407,7 @@ func (s *Store) ReleaseClaim(ctx context.Context, id int64, identity domain.Agen
 	if err = tx.Commit(); err != nil {
 		return domain.TaskView{}, err
 	}
-	return domain.NewTaskView(task, nil), nil
+	return domain.NewTaskView(task, nil, false), nil
 }
 
 func (s *Store) UpdateProgress(ctx context.Context, id int64, percent int, message string, identity domain.AgentIdentity, now time.Time) (domain.TaskView, error) {
@@ -424,11 +444,15 @@ func (s *Store) UpdateProgress(ctx context.Context, id int64, percent int, messa
 	if err = insertActorEvent(ctx, tx, id, "task_progress", "agent", identity.AgentName, map[string]any{"instance_id": identity.InstanceID, "progress": percent, "message": message}, now); err != nil {
 		return domain.TaskView{}, err
 	}
+	pending, err := hasUnansweredBlocking(ctx, tx, id)
+	if err != nil {
+		return domain.TaskView{}, err
+	}
 	task.Progress, task.Phase, task.UpdatedAt, task.Version = percent, phase, now, task.Version+1
 	if err = tx.Commit(); err != nil {
 		return domain.TaskView{}, err
 	}
-	return domain.NewTaskView(task, claim), nil
+	return domain.NewTaskView(task, claim, pending), nil
 }
 
 func (s *Store) CompleteClaimedTask(ctx context.Context, id int64, summary string, identity domain.AgentIdentity, now time.Time) (domain.TaskView, error) {
@@ -448,6 +472,13 @@ func (s *Store) CompleteClaimedTask(ctx context.Context, id int64, summary strin
 	if task.Lifecycle != domain.LifecycleReady || !owns(claim, identity) {
 		return domain.TaskView{}, fmt.Errorf("only the active owner can complete the task: %w", domain.ErrConflict)
 	}
+	pending, err := hasUnansweredBlocking(ctx, tx, id)
+	if err != nil {
+		return domain.TaskView{}, err
+	}
+	if pending {
+		return domain.TaskView{}, fmt.Errorf("task has unanswered blocking questions: %w", domain.ErrConflict)
+	}
 	r, err := tx.ExecContext(ctx, `UPDATE tasks SET lifecycle='done',progress=100,completion_summary=?,completed_at=?,cancelled_at=NULL,updated_at=?,version=version+1 WHERE id=? AND version=?`, summary, formatTime(now), formatTime(now), id, task.Version)
 	if err != nil {
 		return domain.TaskView{}, err
@@ -465,7 +496,7 @@ func (s *Store) CompleteClaimedTask(ctx context.Context, id int64, summary strin
 	if err = tx.Commit(); err != nil {
 		return domain.TaskView{}, err
 	}
-	return domain.NewTaskView(task, nil), nil
+	return domain.NewTaskView(task, nil, false), nil
 }
 
 type scanner interface{ Scan(...any) error }
@@ -487,8 +518,9 @@ func scanTaskView(row scanner) (domain.TaskView, error) {
 	var completed, cancelled sql.NullString
 	var claimID, claimTaskID sql.NullInt64
 	var agentName, instanceID, claimed, released sql.NullString
+	var pendingBlocking bool
 	destinations := taskScanDestinations(&task, &created, &updated, &completed, &cancelled)
-	destinations = append(destinations, &claimID, &claimTaskID, &agentName, &instanceID, &claimed, &released)
+	destinations = append(destinations, &claimID, &claimTaskID, &agentName, &instanceID, &claimed, &released, &pendingBlocking)
 	if err := row.Scan(destinations...); err != nil {
 		return domain.TaskView{}, err
 	}
@@ -497,7 +529,7 @@ func scanTaskView(row scanner) (domain.TaskView, error) {
 		return domain.TaskView{}, err
 	}
 	if !claimID.Valid {
-		return domain.NewTaskView(parsedTask, nil), nil
+		return domain.NewTaskView(parsedTask, nil, pendingBlocking), nil
 	}
 	if !claimTaskID.Valid || !agentName.Valid || !instanceID.Valid || !claimed.Valid {
 		return domain.TaskView{}, errors.New("active claim has null required columns")
@@ -514,7 +546,7 @@ func scanTaskView(row scanner) (domain.TaskView, error) {
 		}
 		claim.ReleasedAt = &releasedAt
 	}
-	return domain.NewTaskView(parsedTask, claim), nil
+	return domain.NewTaskView(parsedTask, claim, pendingBlocking), nil
 }
 
 func taskScanDestinations(t *domain.Task, created, updated *string, completed, cancelled *sql.NullString) []any {

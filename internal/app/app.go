@@ -19,6 +19,10 @@ type TaskRepository interface {
 	ReleaseClaim(context.Context, int64, domain.AgentIdentity, string, time.Time) (domain.TaskView, error)
 	UpdateProgress(context.Context, int64, int, string, domain.AgentIdentity, time.Time) (domain.TaskView, error)
 	CompleteClaimedTask(context.Context, int64, string, domain.AgentIdentity, time.Time) (domain.TaskView, error)
+	AskQuestion(context.Context, int64, string, bool, domain.AgentIdentity, time.Time) (domain.Question, error)
+	AnswerQuestion(context.Context, int64, string, time.Time) (domain.Question, error)
+	AcknowledgeQuestion(context.Context, int64, domain.AgentIdentity, time.Time) (domain.Question, error)
+	ListQuestions(context.Context, int64, domain.QuestionFilter) ([]domain.Question, error)
 }
 
 type EditTaskInput struct {
@@ -168,4 +172,32 @@ func (s *Service) CompleteClaimedTask(ctx context.Context, id int64, comment str
 		return domain.TaskView{}, err
 	}
 	return s.tasks.CompleteClaimedTask(ctx, id, comment, identity, s.now().UTC())
+}
+
+func (s *Service) AskQuestion(ctx context.Context, taskID int64, body string, blocking bool, identity domain.AgentIdentity) (domain.Question, error) {
+	if err := validateIdentity(identity); err != nil {
+		return domain.Question{}, err
+	}
+	if err := domain.ValidateQuestionText(body); err != nil {
+		return domain.Question{}, fmt.Errorf("question body must be non-empty and at most %d characters: %w", domain.MaxQuestionTextLength, err)
+	}
+	return s.tasks.AskQuestion(ctx, taskID, body, blocking, identity, s.now().UTC())
+}
+
+func (s *Service) AnswerQuestion(ctx context.Context, questionID int64, answer string) (domain.Question, error) {
+	if err := domain.ValidateQuestionText(answer); err != nil {
+		return domain.Question{}, fmt.Errorf("answer must be non-empty and at most %d characters: %w", domain.MaxQuestionTextLength, err)
+	}
+	return s.tasks.AnswerQuestion(ctx, questionID, answer, s.now().UTC())
+}
+
+func (s *Service) AcknowledgeQuestion(ctx context.Context, questionID int64, identity domain.AgentIdentity) (domain.Question, error) {
+	if err := validateIdentity(identity); err != nil {
+		return domain.Question{}, err
+	}
+	return s.tasks.AcknowledgeQuestion(ctx, questionID, identity, s.now().UTC())
+}
+
+func (s *Service) ListQuestions(ctx context.Context, taskID int64, filter domain.QuestionFilter) ([]domain.Question, error) {
+	return s.tasks.ListQuestions(ctx, taskID, filter)
 }
