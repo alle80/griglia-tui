@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -78,6 +79,33 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.route, m.form = routeQuestions, newForm()
 		m.questionsLoading, m.loading = true, true
 		return m, tea.Batch(m.loadQuestions(m.questionsTaskID), m.loadTasks())
+	case dependenciesLoadedMsg:
+		if msg.taskID != m.dependenciesTaskID {
+			return m, nil
+		}
+		m.dependenciesLoad = false
+		if msg.err != nil {
+			m.actionErr = msg.err
+			return m, nil
+		}
+		m.actionErr = nil
+		m.dependencies = msg.dependencies
+		m.restoreDependencySelection()
+		return m, nil
+	case dependencyMutatedMsg:
+		m.form.saving = false
+		if msg.err != nil {
+			if m.route == routeForm {
+				m.form.err = msg.err
+			} else {
+				m.actionErr = msg.err
+			}
+			return m, nil
+		}
+		m.depSelectedID, m.status, m.actionErr = msg.dependsOnTaskID, fmt.Sprintf("%s #%d for task #%d", msg.action, msg.dependsOnTaskID, msg.taskID), nil
+		m.route, m.form = routeDependencies, newForm()
+		m.dependenciesLoad, m.loading = true, true
+		return m, tea.Batch(m.loadDependencies(m.dependenciesTaskID), m.loadTasks())
 	case tea.KeyPressMsg:
 		if matches(msg, keys.ForceQuit) || (m.route != routeForm && matches(msg, keys.Quit)) {
 			return m, tea.Quit
@@ -118,9 +146,39 @@ func (m Model) updateRoute(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.updateForm(msg)
 	case routeQuestions:
 		return m.updateQuestions(msg)
+	case routeDependencies:
+		return m.updateDependencies(msg)
 	default:
 		return m, nil
 	}
+}
+
+func (m Model) updateDependencies(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case matches(msg, keys.Back):
+		m.route, m.actionErr = m.dependenciesFrom, nil
+		return m, nil
+	case matches(msg, keys.Down) && len(m.dependencies) > 0:
+		if m.depSelected < len(m.dependencies)-1 {
+			m.depSelected++
+		}
+		m.depSelectedID = m.dependencies[m.depSelected].DependsOnTaskID
+	case matches(msg, keys.Up) && len(m.dependencies) > 0:
+		if m.depSelected > 0 {
+			m.depSelected--
+		}
+		m.depSelectedID = m.dependencies[m.depSelected].DependsOnTaskID
+	case matches(msg, keys.New):
+		m.form = newDependForm(domain.Task{ID: m.dependenciesTaskID})
+		m.sizeForm()
+		m.route = routeForm
+	case matches(msg, keys.Cancel) && len(m.dependencies) > 0:
+		return m, m.removeDependency(m.dependenciesTaskID, m.dependencies[m.depSelected].DependsOnTaskID)
+	case matches(msg, keys.Refresh):
+		m.dependenciesLoad, m.loading, m.actionErr = true, true, nil
+		return m, tea.Batch(m.loadDependencies(m.dependenciesTaskID), m.loadTasks())
+	}
+	return m, nil
 }
 
 func (m Model) updateQuestions(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -167,6 +225,8 @@ func (m Model) updateList(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.selectedID = m.tasks[m.selected].ID
 	case matches(msg, keys.Open) && len(m.tasks) > 0:
 		m.route = routeDetail
+		m.dependenciesTaskID, m.dependencies, m.dependenciesLoad = m.tasks[m.selected].ID, nil, true
+		return m, m.loadDependencies(m.dependenciesTaskID)
 	case matches(msg, keys.New):
 		m.form = newForm()
 		m.sizeForm()
@@ -204,15 +264,24 @@ func (m Model) updateTaskAction(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.questionSelected, m.questionSelectedID = 0, 0
 		m.questionsLoading, m.actionErr = true, nil
 		return m, m.loadQuestions(task.ID)
+	case matches(msg, keys.Depends):
+		m.dependenciesFrom, m.route = m.route, routeDependencies
+		m.dependenciesTaskID, m.dependencies = task.ID, nil
+		m.depSelected, m.depSelectedID = 0, 0
+		m.dependenciesLoad, m.actionErr = true, nil
+		return m, m.loadDependencies(task.ID)
 	}
 	return m, nil
 }
 
 func (m Model) updateForm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "esc" {
-		if m.form.answering {
+		switch {
+		case m.form.answering:
 			m.route = routeQuestions
-		} else {
+		case m.form.depending:
+			m.route = routeDependencies
+		default:
 			m.route = routeList
 		}
 		m.form = newForm()
@@ -220,6 +289,23 @@ func (m Model) updateForm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.form.saving {
 		return m, nil
+	}
+	if m.form.depending {
+		if msg.String() == "enter" {
+			dependsOn, err := strconv.ParseInt(strings.TrimSpace(m.form.inputs[0].Value()), 10, 64)
+			if err != nil || dependsOn < 1 {
+				m.form.err = fmt.Errorf("prerequisite must be a positive task ID")
+				return m, nil
+			}
+			m.form.err, m.form.saving = nil, true
+			return m, m.addDependency(m.form.taskID, dependsOn)
+		}
+		var cmd tea.Cmd
+		m.form.inputs[0], cmd = m.form.inputs[0].Update(msg)
+		if m.form.err != nil {
+			m.form.err = nil
+		}
+		return m, cmd
 	}
 	if m.form.answering {
 		if msg.String() == "enter" {
@@ -303,6 +389,23 @@ func (m *Model) restoreQuestionSelection() {
 		m.questionSelected = len(m.questions) - 1
 	}
 	m.questionSelectedID = m.questions[m.questionSelected].ID
+}
+
+func (m *Model) restoreDependencySelection() {
+	if len(m.dependencies) == 0 {
+		m.depSelected, m.depSelectedID = 0, 0
+		return
+	}
+	for i, dependency := range m.dependencies {
+		if dependency.DependsOnTaskID == m.depSelectedID {
+			m.depSelected = i
+			return
+		}
+	}
+	if m.depSelected >= len(m.dependencies) {
+		m.depSelected = len(m.dependencies) - 1
+	}
+	m.depSelectedID = m.dependencies[m.depSelected].DependsOnTaskID
 }
 
 func (m *Model) restoreSelection() {

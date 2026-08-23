@@ -174,7 +174,7 @@ func (s *state) initCommand() *cobra.Command {
 
 func (s *state) taskCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "task", Short: "Manage tasks"}
-	cmd.AddCommand(s.addCommand(), s.listCommand(), s.showCommand(), s.editCommand(), s.readyCommand(), s.doneCommand(), s.cancelCommand(), s.claimCommand(), s.claimNextCommand(), s.releaseCommand(), s.progressCommand(), s.askCommand(), s.answerCommand(), s.questionsCommand(), s.acknowledgeCommand())
+	cmd.AddCommand(s.addCommand(), s.listCommand(), s.showCommand(), s.editCommand(), s.readyCommand(), s.doneCommand(), s.cancelCommand(), s.claimCommand(), s.claimNextCommand(), s.releaseCommand(), s.progressCommand(), s.askCommand(), s.answerCommand(), s.questionsCommand(), s.acknowledgeCommand(), s.dependCommand(), s.undependCommand(), s.dependenciesCommand())
 	return cmd
 }
 
@@ -504,6 +504,111 @@ func (s *state) writeQuestion(verb string, q domain.Question) error {
 	return err
 }
 
+func dependencyIDs(cmd *cobra.Command, args []string, on string) (int64, int64, error) {
+	id, err := taskID(args[0])
+	if err != nil {
+		return 0, 0, err
+	}
+	if !cmd.Flags().Changed("on") {
+		return 0, 0, &commandError{2, "invalid_input", "--on DEPENDENCY_ID is required"}
+	}
+	dependsOn, err := strconv.ParseInt(on, 10, 64)
+	if err != nil || dependsOn < 1 {
+		return 0, 0, &commandError{2, "invalid_input", "dependency ID must be a positive integer"}
+	}
+	return id, dependsOn, nil
+}
+
+func (s *state) dependCommand() *cobra.Command {
+	var on string
+	cmd := &cobra.Command{Use: "depend ID --on DEPENDENCY_ID", Short: "Make a task depend on a prerequisite", Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		id, dependsOn, err := dependencyIDs(cmd, args, on)
+		if err != nil {
+			return err
+		}
+		service, closeFn, err := s.service()
+		if err != nil {
+			return err
+		}
+		defer closeFn()
+		dependency, err := service.AddDependency(cmd.Context(), id, dependsOn)
+		if err != nil {
+			return err
+		}
+		if s.json {
+			return writeJSON(s.out, map[string]any{"dependency": toDependencyDTO(dependency)}, nil)
+		}
+		_, err = fmt.Fprintf(s.out, "Task #%d now depends on #%d: %s\n", dependency.TaskID, dependency.DependsOnTaskID, dependency.Title)
+		return err
+	}}
+	cmd.Flags().StringVar(&on, "on", "", "prerequisite task ID")
+	return cmd
+}
+
+func (s *state) undependCommand() *cobra.Command {
+	var on string
+	cmd := &cobra.Command{Use: "undepend ID --on DEPENDENCY_ID", Short: "Remove a task dependency", Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		id, dependsOn, err := dependencyIDs(cmd, args, on)
+		if err != nil {
+			return err
+		}
+		service, closeFn, err := s.service()
+		if err != nil {
+			return err
+		}
+		defer closeFn()
+		if err = service.RemoveDependency(cmd.Context(), id, dependsOn); err != nil {
+			return err
+		}
+		if s.json {
+			return writeJSON(s.out, map[string]any{"dependency": map[string]any{"task_id": id, "depends_on_task_id": dependsOn}}, nil)
+		}
+		_, err = fmt.Fprintf(s.out, "Task #%d no longer depends on #%d\n", id, dependsOn)
+		return err
+	}}
+	cmd.Flags().StringVar(&on, "on", "", "prerequisite task ID")
+	return cmd
+}
+
+func (s *state) dependenciesCommand() *cobra.Command {
+	return &cobra.Command{Use: "dependencies ID", Short: "List a task's direct dependencies", Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		id, err := taskID(args[0])
+		if err != nil {
+			return err
+		}
+		service, closeFn, err := s.service()
+		if err != nil {
+			return err
+		}
+		defer closeFn()
+		dependencies, err := service.ListDependencies(cmd.Context(), id)
+		if err != nil {
+			return err
+		}
+		if s.json {
+			dto := make([]dependencyDTO, 0, len(dependencies))
+			for _, d := range dependencies {
+				dto = append(dto, toDependencyDTO(d))
+			}
+			return writeJSON(s.out, map[string]any{"dependencies": dto}, nil)
+		}
+		if len(dependencies) == 0 {
+			_, err = fmt.Fprintln(s.out, "No dependencies.")
+			return err
+		}
+		for _, d := range dependencies {
+			label := "unsatisfied"
+			if d.Satisfied() {
+				label = "satisfied"
+			}
+			if _, err = fmt.Fprintf(s.out, "#%-4d %-9s %-12s %s\n", d.DependsOnTaskID, d.Lifecycle, label, d.Title); err != nil {
+				return err
+			}
+		}
+		return nil
+	}}
+}
+
 func (s *state) cancelCommand() *cobra.Command {
 	var reason string
 	cmd := &cobra.Command{Use: "cancel ID", Short: "Cancel a task", Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
@@ -547,7 +652,7 @@ func (s *state) transitionCommand(use, short, verb string, run func(context.Cont
 
 func (s *state) writeTaskMutation(verb string, t domain.Task) error {
 	if s.json {
-		return writeJSON(s.out, map[string]any{"task": toTaskDTO(domain.NewTaskView(t, nil, false))}, nil)
+		return writeJSON(s.out, map[string]any{"task": toTaskDTO(domain.NewTaskView(t, nil, false, false))}, nil)
 	}
 	_, err := fmt.Fprintf(s.out, "%s task #%d: %s\n", verb, t.ID, t.Title)
 	return err
@@ -583,7 +688,7 @@ func (s *state) addCommand() *cobra.Command {
 			return err
 		}
 		if s.json {
-			return writeJSON(s.out, map[string]any{"task": toTaskDTO(domain.NewTaskView(t, nil, false))}, nil)
+			return writeJSON(s.out, map[string]any{"task": toTaskDTO(domain.NewTaskView(t, nil, false, false))}, nil)
 		}
 		_, err = fmt.Fprintf(s.out, "Added task #%d: %s\n", t.ID, t.Title)
 		return err
@@ -720,6 +825,18 @@ type questionDTO struct {
 	Answer         *string    `json:"answer"`
 	AnsweredAt     *string    `json:"answered_at"`
 	AcknowledgedAt *string    `json:"acknowledged_at"`
+}
+
+type dependencyDTO struct {
+	TaskID          int64            `json:"task_id"`
+	DependsOnTaskID int64            `json:"depends_on_task_id"`
+	Title           string           `json:"title"`
+	Lifecycle       domain.Lifecycle `json:"lifecycle"`
+	Satisfied       bool             `json:"satisfied"`
+}
+
+func toDependencyDTO(d domain.DependencyView) dependencyDTO {
+	return dependencyDTO{TaskID: d.TaskID, DependsOnTaskID: d.DependsOnTaskID, Title: d.Title, Lifecycle: d.Lifecycle, Satisfied: d.Satisfied()}
 }
 
 func toQuestionDTO(q domain.Question) questionDTO {

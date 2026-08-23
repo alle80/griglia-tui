@@ -16,15 +16,17 @@ import (
 )
 
 type fakeService struct {
-	tasks     []domain.Task
-	listErr   error
-	addErr    error
-	added     []app.AddTaskInput
-	nextID    int64
-	actionErr error
-	questions []domain.Question
-	qListErr  error
-	answerErr error
+	tasks        []domain.Task
+	listErr      error
+	addErr       error
+	added        []app.AddTaskInput
+	nextID       int64
+	actionErr    error
+	questions    []domain.Question
+	qListErr     error
+	answerErr    error
+	dependencies []domain.DependencyView
+	depErr       error
 }
 
 func (f *fakeService) EditTask(_ context.Context, id int64, in app.EditTaskInput) (domain.Task, error) {
@@ -71,7 +73,7 @@ func (f *fakeService) setLifecycle(id int64, lifecycle domain.Lifecycle) (domain
 func (f *fakeService) ListTasks(context.Context) ([]domain.TaskView, error) {
 	views := make([]domain.TaskView, 0, len(f.tasks))
 	for _, task := range f.tasks {
-		views = append(views, domain.NewTaskView(task, nil, false))
+		views = append(views, domain.NewTaskView(task, nil, false, false))
 	}
 	return views, f.listErr
 }
@@ -101,6 +103,39 @@ func (f *fakeService) AnswerQuestion(_ context.Context, questionID int64, answer
 		}
 	}
 	return domain.Question{}, domain.ErrNotFound
+}
+
+func (f *fakeService) ListDependencies(_ context.Context, taskID int64) ([]domain.DependencyView, error) {
+	dependencies := make([]domain.DependencyView, 0, len(f.dependencies))
+	for _, d := range f.dependencies {
+		if d.TaskID == taskID {
+			dependencies = append(dependencies, d)
+		}
+	}
+	return dependencies, nil
+}
+
+func (f *fakeService) AddDependency(_ context.Context, taskID, dependsOnTaskID int64) (domain.DependencyView, error) {
+	if f.depErr != nil {
+		return domain.DependencyView{}, f.depErr
+	}
+	d := domain.DependencyView{TaskID: taskID, DependsOnTaskID: dependsOnTaskID, Title: fmt.Sprintf("Task %d", dependsOnTaskID), Lifecycle: domain.LifecycleReady}
+	f.dependencies = append(f.dependencies, d)
+	return d, nil
+}
+
+func (f *fakeService) RemoveDependency(_ context.Context, taskID, dependsOnTaskID int64) error {
+	if f.depErr != nil {
+		return f.depErr
+	}
+	kept := f.dependencies[:0]
+	for _, d := range f.dependencies {
+		if !(d.TaskID == taskID && d.DependsOnTaskID == dependsOnTaskID) {
+			kept = append(kept, d)
+		}
+	}
+	f.dependencies = kept
+	return nil
 }
 
 func (f *fakeService) AddTask(_ context.Context, input app.AddTaskInput) (domain.Task, error) {
@@ -319,6 +354,13 @@ func (repository) AcknowledgeQuestion(context.Context, int64, domain.AgentIdenti
 func (repository) ListQuestions(context.Context, int64, domain.QuestionFilter) ([]domain.Question, error) {
 	return nil, nil
 }
+func (repository) AddDependency(context.Context, int64, int64, time.Time) (domain.DependencyView, error) {
+	return domain.DependencyView{}, nil
+}
+func (repository) RemoveDependency(context.Context, int64, int64, time.Time) error { return nil }
+func (repository) ListDependencies(context.Context, int64) ([]domain.DependencyView, error) {
+	return nil, nil
+}
 
 func TestLifecycleActionsEditAndHelp(t *testing.T) {
 	service := &fakeService{tasks: []domain.Task{makeTask(1, "First", domain.PriorityLow, domain.LifecycleBacklog), makeTask(2, "Second", domain.PriorityHigh, domain.LifecycleReady)}}
@@ -422,7 +464,7 @@ func TestAgentCoordinationRendering(t *testing.T) {
 	task.Progress, task.Phase = 65, "Error recovery"
 	claimed := time.Date(2026, 8, 23, 12, 30, 0, 0, time.UTC)
 	claim := &domain.Claim{TaskID: 8, AgentName: "codex", InstanceID: "session-123", ClaimedAt: claimed}
-	view := domain.NewTaskView(task, claim, false)
+	view := domain.NewTaskView(task, claim, false, false)
 	model := New(context.Background(), &fakeService{})
 	model.loading, model.tasks, model.selectedID = false, []domain.TaskView{view}, 8
 	model.restoreSelection()
@@ -466,7 +508,7 @@ func makeQuestion(id, taskID int64, body string, blocking bool) domain.Question 
 func TestWaitingForHumanRendering(t *testing.T) {
 	task := makeTask(8, "Parser", domain.PriorityHigh, domain.LifecycleReady)
 	claim := &domain.Claim{TaskID: 8, AgentName: "codex", InstanceID: "session-123", ClaimedAt: time.Date(2026, 8, 23, 12, 30, 0, 0, time.UTC)}
-	view := domain.NewTaskView(task, claim, true)
+	view := domain.NewTaskView(task, claim, true, false)
 	model := New(context.Background(), &fakeService{})
 	model.loading, model.tasks, model.selectedID = false, []domain.TaskView{view}, 8
 	model.width = 120
@@ -620,10 +662,140 @@ func TestQuestionLoadErrorIsRecoverable(t *testing.T) {
 	}
 }
 
+func makeDependency(taskID, dependsOn int64, title string, lifecycle domain.Lifecycle) domain.DependencyView {
+	return domain.DependencyView{TaskID: taskID, DependsOnTaskID: dependsOn, Title: title, Lifecycle: lifecycle, CreatedAt: time.Date(2026, 8, 23, 12, 20, 0, 0, time.UTC)}
+}
+
+func TestBlockedRendering(t *testing.T) {
+	task := makeTask(9, "Backend", domain.PriorityUrgent, domain.LifecycleReady)
+	view := domain.NewTaskView(task, nil, false, true)
+	model := New(context.Background(), &fakeService{})
+	model.loading, model.tasks, model.selectedID = false, []domain.TaskView{view}, 9
+	model.width = 120
+	model.restoreSelection()
+	if !strings.Contains(model.render(), "[blocked]") {
+		t.Fatalf("list missing blocked indicator: %q", model.render())
+	}
+	model.route = routeDetail
+	for _, want := range []string{"Operational state: blocked", "!! Blocked by unsatisfied dependencies", "press b"} {
+		if !strings.Contains(model.render(), want) {
+			t.Fatalf("detail missing %q: %q", want, model.render())
+		}
+	}
+	model.route, model.width = routeList, 38
+	if !strings.Contains(model.render(), "blocked") {
+		t.Fatalf("narrow list=%q", model.render())
+	}
+}
+
+func TestDependencyNavigationAddRemoveAndSelection(t *testing.T) {
+	service := &fakeService{
+		tasks:        []domain.Task{makeTask(2, "Backend", domain.PriorityUrgent, domain.LifecycleReady), makeTask(1, "Schema", domain.PriorityHigh, domain.LifecycleDone)},
+		dependencies: []domain.DependencyView{makeDependency(2, 1, "Schema", domain.LifecycleDone), makeDependency(2, 3, "API", domain.LifecycleReady)},
+	}
+	model := load(t, New(context.Background(), service))
+	model, cmd := update(t, model, key("enter"))
+	if model.route != routeDetail || cmd == nil {
+		t.Fatalf("detail should load dependencies: route=%v", model.route)
+	}
+	model = runCmd(t, model, cmd)
+	// The detail view lists direct dependencies with their satisfaction.
+	for _, want := range []string{"Dependencies", "satisfied", "unsatisfied", "Schema", "API"} {
+		if !strings.Contains(model.render(), want) {
+			t.Fatalf("detail missing %q: %q", want, model.render())
+		}
+	}
+	model, cmd = update(t, model, key("b"))
+	if model.route != routeDependencies || cmd == nil {
+		t.Fatalf("route=%v", model.route)
+	}
+	model = runCmd(t, model, cmd)
+	if !strings.Contains(model.render(), "DEPENDENCIES — TASK #2") {
+		t.Fatalf("dependencies view=%q", model.render())
+	}
+	model, _ = update(t, model, key("j"))
+	if model.depSelectedID != 3 {
+		t.Fatalf("selected dependency=%d", model.depSelectedID)
+	}
+	// Remove the selected edge; selection then falls back safely.
+	model, cmd = update(t, model, key("x"))
+	model = runCmd(t, model, cmd)
+	if len(model.dependencies) != 1 || model.dependencies[0].DependsOnTaskID != 1 {
+		t.Fatalf("dependencies after remove=%+v", model.dependencies)
+	}
+	if !strings.Contains(model.status, "Removed dependency") {
+		t.Fatalf("status=%q", model.status)
+	}
+	// Add a new prerequisite through the form.
+	model, _ = update(t, model, key("n"))
+	if model.route != routeForm || !model.form.depending {
+		t.Fatalf("form=%+v", model.form)
+	}
+	model.form.inputs[0].SetValue("4")
+	model, cmd = update(t, model, key("enter"))
+	if cmd == nil || !model.form.saving {
+		t.Fatal("expected add command")
+	}
+	model = runCmd(t, model, cmd)
+	if model.route != routeDependencies || model.depSelectedID != 4 || len(model.dependencies) != 2 {
+		t.Fatalf("after add route=%v selected=%d deps=%+v", model.route, model.depSelectedID, model.dependencies)
+	}
+	model, _ = update(t, model, key("q"))
+	if model.route != routeDetail {
+		t.Fatalf("route after back=%v", model.route)
+	}
+}
+
+func TestDependencyFormValidationAndCycleRecovery(t *testing.T) {
+	service := &fakeService{tasks: []domain.Task{makeTask(2, "Backend", domain.PriorityUrgent, domain.LifecycleReady)}}
+	model := load(t, New(context.Background(), service))
+	model, cmd := update(t, model, key("b"))
+	model = runCmd(t, model, cmd)
+	model, _ = update(t, model, key("n"))
+	// A non-numeric prerequisite is rejected locally and recoverable.
+	model.form.inputs[0].SetValue("nope")
+	model, cmd = update(t, model, key("enter"))
+	if cmd != nil || model.form.err == nil {
+		t.Fatalf("invalid id err=%v", model.form.err)
+	}
+	// A cycle conflict surfaces in the form and the model stays usable.
+	service.depErr = fmt.Errorf("dependency would create a cycle: %w", domain.ErrConflict)
+	model.form.inputs[0].SetValue("7")
+	model, cmd = update(t, model, key("enter"))
+	if cmd == nil {
+		t.Fatal("expected add command")
+	}
+	model, _ = update(t, model, cmd())
+	if model.route != routeForm || model.form.err == nil || !strings.Contains(model.render(), "cycle") {
+		t.Fatalf("cycle recovery route=%v err=%v", model.route, model.form.err)
+	}
+	model, _ = update(t, model, key("esc"))
+	if model.route != routeDependencies {
+		t.Fatalf("route after esc=%v", model.route)
+	}
+}
+
+func TestPrintableShortcutsAreTextInDependencyForm(t *testing.T) {
+	for _, printable := range []string{"e", "a", "d", "x", "Q", "w", "b", "r", "q", "n", "j", "k"} {
+		t.Run(printable, func(t *testing.T) {
+			service := &fakeService{tasks: []domain.Task{makeTask(2, "Backend", domain.PriorityUrgent, domain.LifecycleReady)}}
+			model := load(t, New(context.Background(), service))
+			model, cmd := update(t, model, key("b"))
+			model = runCmd(t, model, cmd)
+			model, _ = update(t, model, key("n"))
+			model, cmd = update(t, model, key(printable))
+			assertPrintableStayedInForm(t, model, cmd, printable)
+			if len(service.dependencies) != 0 {
+				t.Fatalf("shortcut mutated dependencies: %+v", service.dependencies)
+			}
+		})
+	}
+}
+
 func TestClaimedTaskLifecycleConflictIsRecoverable(t *testing.T) {
 	task := makeTask(8, "Parser", domain.PriorityHigh, domain.LifecycleReady)
 	claim := &domain.Claim{TaskID: 8, AgentName: "codex", InstanceID: "session-123", ClaimedAt: time.Now().UTC()}
-	view := domain.NewTaskView(task, claim, false)
+	view := domain.NewTaskView(task, claim, false, false)
 	service := &fakeService{tasks: []domain.Task{task}, actionErr: fmt.Errorf("task is actively claimed: %w", domain.ErrConflict)}
 	model := New(context.Background(), service)
 	model.loading, model.tasks, model.selectedID = false, []domain.TaskView{view}, 8

@@ -35,7 +35,7 @@ func TestMigrationAndReopen(t *testing.T) {
 	if err = s.db.QueryRow("SELECT MAX(version) FROM schema_migrations").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 4 {
+	if version != 5 {
 		t.Fatalf("version=%d", version)
 	}
 	if err = s.Close(); err != nil {
@@ -91,7 +91,7 @@ func TestMigrationsFromExistingV1Database(t *testing.T) {
 	}
 	defer s.Close()
 	var version int
-	if err = s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 4 {
+	if err = s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 5 {
 		t.Fatalf("version=%d err=%v", version, err)
 	}
 	if _, err = s.db.Exec(`INSERT INTO events(kind,actor_kind,payload_json,created_at) VALUES('probe','human','{}',?)`, formatTime(time.Now().UTC())); err != nil {
@@ -137,7 +137,7 @@ func TestMigration003FromExistingV2Database(t *testing.T) {
 	}
 	defer s.Close()
 	var version int
-	if err = s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 4 {
+	if err = s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 5 {
 		t.Fatalf("version=%d err=%v", version, err)
 	}
 	var table string
@@ -188,7 +188,7 @@ func TestMigration004FromExistingV3Database(t *testing.T) {
 	}
 	defer s.Close()
 	var version int
-	if err = s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 4 {
+	if err = s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 5 {
 		t.Fatalf("version=%d err=%v", version, err)
 	}
 	view, err := s.GetTask(context.Background(), 1)
@@ -359,9 +359,9 @@ func TestListTasksIncludesOnlyActiveClaimsInSingleQuery(t *testing.T) {
 
 func TestListTasksQueryJoinsActiveClaims(t *testing.T) {
 	normalized := strings.Join(strings.Fields(strings.ToLower(listTasksQuery)), " ")
-	// One outer select over tasks plus the correlated questions EXISTS —
-	// never a per-task query issued from Go.
-	if strings.Count(normalized, "select ") != 2 {
+	// One outer select over tasks plus the correlated questions and
+	// dependencies EXISTS subqueries — never a per-task query issued from Go.
+	if strings.Count(normalized, "select ") != 3 {
 		t.Fatalf("list query must remain a single statement: %s", normalized)
 	}
 	if strings.Count(normalized, "from tasks") != 1 {
@@ -372,6 +372,9 @@ func TestListTasksQueryJoinsActiveClaims(t *testing.T) {
 	}
 	if !strings.Contains(normalized, "exists(select 1 from questions where questions.task_id=tasks.id and questions.blocking=1 and questions.answered_at is null)") {
 		t.Fatalf("list query must derive unanswered blocking questions inline: %s", normalized)
+	}
+	if !strings.Contains(normalized, "exists(select 1 from dependencies join tasks prerequisite on prerequisite.id=dependencies.depends_on_task_id where dependencies.task_id=tasks.id and prerequisite.lifecycle<>'done')") {
+		t.Fatalf("list query must derive unsatisfied dependencies inline: %s", normalized)
 	}
 }
 
