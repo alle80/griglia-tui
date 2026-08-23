@@ -214,6 +214,10 @@ Protocol conformance tests live in `internal/cli/protocol_test.go`; migration
 and concurrency suites in `internal/sqlite/`. Benchmarks:
 `go test ./internal/sqlite/ -bench . -run '^$'`.
 
+## License
+
+Griglia is released under the MIT License. See [LICENSE](LICENSE).
+
 ## Release status
 
 Pre-release: the protocol is v1 and stable, the release pipeline is in place
