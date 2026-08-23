@@ -379,7 +379,7 @@ func (m Model) questionsView() string {
 
 func (m Model) formView() string {
 	if m.form.depending {
-		lines := []string{titleStyle.Render(fmt.Sprintf("ADD DEPENDENCY — TASK #%d", m.form.taskID)), "", selectedStyle.Render("Prerequisite task ID"), m.form.inputs[0].View(), ""}
+		lines := []string{titleStyle.Render(fmt.Sprintf("ADD DEPENDENCY — TASK #%d", m.form.taskID)), "", selectedStyle.Render("Prerequisite task ID"), m.form.input.View(), ""}
 		if m.form.err != nil {
 			lines = append(lines, errorStyle.Render(m.form.err.Error()), "")
 		}
@@ -390,7 +390,7 @@ func (m Model) formView() string {
 		return strings.Join(lines, "\n")
 	}
 	if m.form.answering {
-		lines := []string{titleStyle.Render(fmt.Sprintf("ANSWER QUESTION #%d", m.form.questionID)), "", m.form.questionBody, "", selectedStyle.Render("Answer"), m.form.inputs[0].View(), ""}
+		lines := []string{titleStyle.Render(fmt.Sprintf("ANSWER QUESTION #%d", m.form.questionID)), "", m.form.questionBody, "", selectedStyle.Render("Answer"), m.form.input.View(), ""}
 		if m.form.err != nil {
 			lines = append(lines, errorStyle.Render(m.form.err.Error()), "")
 		}
@@ -401,7 +401,7 @@ func (m Model) formView() string {
 		return strings.Join(lines, "\n")
 	}
 	if m.form.cancelling {
-		lines := []string{titleStyle.Render("CANCEL TASK"), "", selectedStyle.Render("Reason (optional)"), m.form.inputs[0].View(), ""}
+		lines := []string{titleStyle.Render("CANCEL TASK"), "", selectedStyle.Render("Reason (optional)"), m.form.input.View(), ""}
 		if m.form.err != nil {
 			lines = append(lines, errorStyle.Render(m.form.err.Error()), "")
 		}
@@ -411,26 +411,26 @@ func (m Model) formView() string {
 		lines = append(lines, mutedStyle.Render("enter cancel task · esc back · Ctrl-C quit"))
 		return strings.Join(lines, "\n")
 	}
-	labels := []string{"Title", "Description", "Priority"}
 	heading := "NEW TASK"
 	if m.form.editing {
 		heading = "EDIT TASK"
 	}
-	lines := []string{titleStyle.Render(heading), ""}
-	for i, input := range m.form.inputs {
-		label := labels[i]
-		if i == m.form.focus {
-			label = selectedStyle.Render(label)
+	label := func(field int, text string) string {
+		if field == m.form.focus {
+			return selectedStyle.Render(text)
 		}
-		lines = append(lines, label, input.View(), "")
+		return text
 	}
+	lines := []string{titleStyle.Render(heading), "", label(focusTitle, "Title"), m.form.input.View(), "", label(focusDescription, "Description")}
+	lines = append(lines, strings.Split(m.form.description.View(), "\n")...)
+	lines = append(lines, "", label(focusPriority, "Priority"), m.form.priority.View(), "")
 	if m.form.err != nil {
 		lines = append(lines, errorStyle.Render(m.form.err.Error()), "")
 	}
 	if m.form.saving {
 		lines = append(lines, "Saving…", "")
 	}
-	lines = append(lines, mutedStyle.Render("tab/↑/↓ field · enter next/save · esc cancel · Ctrl-C quit"))
+	lines = append(lines, mutedStyle.Render("tab/shift+tab field · enter newline/save · esc cancel · Ctrl-C quit"))
 	return strings.Join(lines, "\n")
 }
 

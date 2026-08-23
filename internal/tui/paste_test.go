@@ -27,7 +27,7 @@ func assertPastedIntoForm(t *testing.T, model Model, cmd tea.Cmd, want string) {
 	if model.route != routeForm {
 		t.Fatalf("paste changed route to %v", model.route)
 	}
-	if got := model.form.inputs[model.form.focus].Value(); got != want {
+	if got := focusedValue(model.form); got != want {
 		t.Fatalf("input value=%q, want %q", got, want)
 	}
 }
@@ -41,11 +41,11 @@ func TestPasteReachesEveryFieldOfCreateForm(t *testing.T) {
 	model, cmd = update(t, model, paste("Pasted description"))
 	assertPastedIntoForm(t, model, cmd, "Pasted description")
 	model, _ = update(t, model, key("tab"))
-	model.form.inputs[2].SetValue("")
+	model.form.priority.SetValue("")
 	model, cmd = update(t, model, paste("high"))
 	assertPastedIntoForm(t, model, cmd, "high")
-	if model.form.inputs[0].Value() != "Pasted title" || model.form.inputs[1].Value() != "Pasted description" {
-		t.Fatalf("earlier fields lost their pasted values: %q %q", model.form.inputs[0].Value(), model.form.inputs[1].Value())
+	if model.form.input.Value() != "Pasted title" || model.form.description.Value() != "Pasted description" {
+		t.Fatalf("earlier fields lost their pasted values: %q %q", model.form.input.Value(), model.form.description.Value())
 	}
 }
 
@@ -63,7 +63,7 @@ func TestPasteWithShortcutCharactersInEveryTextEntryRoute(t *testing.T) {
 		},
 		"edit": func(t *testing.T, model Model) Model {
 			model, _ = update(t, model, key("e"))
-			model.form.inputs[0].SetValue("")
+			model.form.input.SetValue("")
 			return model
 		},
 		"cancel-reason": func(t *testing.T, model Model) Model {
@@ -110,7 +110,7 @@ func TestMultilinePasteCollapsesToSpacesInSingleLineFields(t *testing.T) {
 	model, _ = update(t, model, key("n"))
 	model, cmd := update(t, model, paste("line one\nline two"))
 	assertPastedIntoForm(t, model, cmd, "line one line two")
-	model.form.inputs[0].SetValue("")
+	model.form.input.SetValue("")
 	model, cmd = update(t, model, paste("crlf one\r\ncrlf two\ttabbed"))
 	assertPastedIntoForm(t, model, cmd, "crlf one crlf two tabbed")
 }
@@ -161,11 +161,11 @@ func TestPasteOutsideFormsIsDiscarded(t *testing.T) {
 func TestPasteWhileSavingIsIgnored(t *testing.T) {
 	model := load(t, New(context.Background(), &fakeService{}))
 	model, _ = update(t, model, key("n"))
-	model.form.inputs[0].SetValue("Task")
+	model.form.input.SetValue("Task")
 	model.form.saving = true
 	model, cmd := update(t, model, paste("late paste"))
-	if cmd != nil || model.form.inputs[0].Value() != "Task" {
-		t.Fatalf("paste while saving mutated the form: %q", model.form.inputs[0].Value())
+	if cmd != nil || model.form.input.Value() != "Task" {
+		t.Fatalf("paste while saving mutated the form: %q", model.form.input.Value())
 	}
 }
 
@@ -175,12 +175,12 @@ func TestPasteClearsRecoverableFormError(t *testing.T) {
 	model, cmd := update(t, model, key("b"))
 	model = runCmd(t, model, cmd)
 	model, _ = update(t, model, key("n"))
-	model.form.inputs[0].SetValue("nope")
+	model.form.input.SetValue("nope")
 	model, _ = update(t, model, key("enter"))
 	if model.form.err == nil {
 		t.Fatal("expected validation error")
 	}
-	model.form.inputs[0].SetValue("")
+	model.form.input.SetValue("")
 	model, cmd = update(t, model, paste("42"))
 	if model.form.err != nil {
 		t.Fatal("paste should clear the recoverable error")
@@ -214,7 +214,7 @@ func TestPasteCharLimitIsRespected(t *testing.T) {
 	model := load(t, New(context.Background(), &fakeService{}))
 	model, _ = update(t, model, key("n"))
 	model, _ = update(t, model, paste(strings.Repeat("x", domain.MaxTitleLength+50)))
-	if got := len(model.form.inputs[0].Value()); got != domain.MaxTitleLength {
+	if got := len(model.form.input.Value()); got != domain.MaxTitleLength {
 		t.Fatalf("title length=%d, want %d", got, domain.MaxTitleLength)
 	}
 }

@@ -133,7 +133,7 @@ func TestFormFooterAdvertisesOnlyActiveKeys(t *testing.T) {
 	if cmd != nil && fmt.Sprintf("%T", cmd()) == "tea.QuitMsg" {
 		t.Fatal("Q must not quit inside a form")
 	}
-	if got := model.form.inputs[0].Value(); got != "Q" {
+	if got := model.form.input.Value(); got != "Q" {
 		t.Fatalf("title input=%q", got)
 	}
 }

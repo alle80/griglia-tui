@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 
@@ -124,8 +125,21 @@ type Model struct {
 	tick               func() tea.Cmd
 }
 
+// Form focus order for the create/edit task form. The single-field variants
+// (cancel reason, answer, dependency) always keep focus on the primary input.
+const (
+	focusTitle = iota
+	focusDescription
+	focusPriority
+	formFieldCount
+)
+
 type formModel struct {
-	inputs       [3]textinput.Model
+	// input is the primary single-line field: the title in the create/edit
+	// form, and the sole field of the cancel/answer/dependency forms.
+	input        textinput.Model
+	description  textarea.Model
+	priority     textinput.Model
 	focus        int
 	err          error
 	saving       bool
@@ -141,35 +155,36 @@ type formModel struct {
 func newEditForm(task domain.Task) formModel {
 	f := newForm()
 	f.editing, f.taskID = true, task.ID
-	f.inputs[0].SetValue(task.Title)
-	f.inputs[1].SetValue(task.Description)
-	f.inputs[2].SetValue(string(task.Priority))
+	f.input.SetValue(task.Title)
+	f.description.SetValue(task.Description)
+	f.description.MoveToBegin()
+	f.priority.SetValue(string(task.Priority))
 	return f
 }
 
 func newCancelForm(task domain.Task) formModel {
 	f := newForm()
 	f.cancelling, f.taskID = true, task.ID
-	f.inputs[0].Placeholder = "Optional cancellation reason"
-	f.inputs[0].CharLimit = 0
+	f.input.Placeholder = "Optional cancellation reason"
+	f.input.CharLimit = 0
 	return f
 }
 
 func newDependForm(task domain.Task) formModel {
 	f := newForm()
 	f.depending, f.taskID = true, task.ID
-	f.inputs[0].Placeholder = "Prerequisite task ID"
-	f.inputs[0].CharLimit = 0
+	f.input.Placeholder = "Prerequisite task ID"
+	f.input.CharLimit = 0
 	return f
 }
 
 func newAnswerForm(question domain.Question) formModel {
 	f := newForm()
 	f.answering, f.questionID, f.questionBody = true, question.ID, question.Body
-	f.inputs[0].Placeholder = "Answer"
-	f.inputs[0].CharLimit = domain.MaxQuestionTextLength
+	f.input.Placeholder = "Answer"
+	f.input.CharLimit = domain.MaxQuestionTextLength
 	if question.Answer != nil {
-		f.inputs[0].SetValue(*question.Answer)
+		f.input.SetValue(*question.Answer)
 	}
 	return f
 }
@@ -193,15 +208,28 @@ func newForm() formModel {
 	title.Placeholder = "Task title"
 	title.CharLimit = domain.MaxTitleLength
 	title.Prompt = "> "
-	description := textinput.New()
+	description := textarea.New()
 	description.Placeholder = "Optional description"
-	description.Prompt = "> "
+	description.Prompt = "│ "
+	description.ShowLineNumbers = false
+	// Descriptions are unbounded plain text: no character or line limits, so
+	// long structured pastes are never silently truncated. The widget's own
+	// viewport provides vertical scrolling beyond the visible height.
+	description.CharLimit = 0
+	description.MaxHeight = 0
+	// The update loop never routes cursor blink messages back to form
+	// widgets, so a blinking cursor would just freeze mid-blink; a static
+	// cursor matches the single-line inputs and keeps tests free of
+	// wall-clock blink commands.
+	styles := description.Styles()
+	styles.Cursor.Blink = false
+	description.SetStyles(styles)
 	priority := textinput.New()
 	priority.Placeholder = "low, normal, high, or urgent"
 	priority.Prompt = "> "
 	priority.SetValue(string(domain.PriorityNormal))
-	f := formModel{inputs: [3]textinput.Model{title, description, priority}}
-	f.inputs[0].Focus()
+	f := formModel{input: title, description: description, priority: priority}
+	f.input.Focus()
 	return f
 }
 
