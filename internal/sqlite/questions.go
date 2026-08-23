@@ -124,7 +124,9 @@ func (s *Store) ListQuestions(ctx context.Context, taskID int64, filter domain.Q
 	case domain.QuestionsUnanswered:
 		query += ` AND answered_at IS NULL`
 	case domain.QuestionsUnacknowledged:
-		query += ` AND acknowledged_at IS NULL`
+		// Unacknowledged means answered but not yet consumed by the asking
+		// agent; questions still awaiting an answer are not included.
+		query += ` AND answered_at IS NOT NULL AND acknowledged_at IS NULL`
 	}
 	rows, err := s.db.QueryContext(ctx, query+` ORDER BY id ASC`, taskID)
 	if err != nil {

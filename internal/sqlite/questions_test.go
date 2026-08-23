@@ -268,16 +268,19 @@ func TestQuestionFiltersAndHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Three states: A unanswered, B answered-not-acknowledged, C acknowledged.
 	all, err := s.ListQuestions(ctx, task.ID, domain.QuestionsAll)
-	if err != nil || len(all) != 3 || all[0].ID != unanswered.ID || all[2].ID != ackedQ.ID {
+	if err != nil || len(all) != 3 || all[0].ID != unanswered.ID || all[1].ID != answeredOnly.ID || all[2].ID != ackedQ.ID {
 		t.Fatalf("all=%+v err=%v", all, err)
 	}
 	open, err := s.ListQuestions(ctx, task.ID, domain.QuestionsUnanswered)
 	if err != nil || len(open) != 1 || open[0].ID != unanswered.ID {
 		t.Fatalf("unanswered=%+v err=%v", open, err)
 	}
+	// Unacknowledged returns only answered-but-unconsumed questions,
+	// never ones still waiting for an answer.
 	pending, err := s.ListQuestions(ctx, task.ID, domain.QuestionsUnacknowledged)
-	if err != nil || len(pending) != 2 || pending[0].ID != unanswered.ID || pending[1].ID != answeredOnly.ID {
+	if err != nil || len(pending) != 1 || pending[0].ID != answeredOnly.ID {
 		t.Fatalf("unacknowledged=%+v err=%v", pending, err)
 	}
 

@@ -211,8 +211,10 @@ func TestQuestionFlowCLIAndJSON(t *testing.T) {
 	if code != 0 || stderr != "" || !strings.Contains(out, `"body":"FYI only"`) || strings.Contains(out, "malformed nodes") {
 		t.Fatalf("unanswered: %d %q %q", code, out, stderr)
 	}
+	// Unacknowledged returns the answered question only, never the
+	// still-unanswered one.
 	code, out, stderr = run(t, dir, "task", "questions", "1", "--unacknowledged", "--json")
-	if code != 0 || stderr != "" || !strings.Contains(out, "malformed nodes") || !strings.Contains(out, "FYI only") {
+	if code != 0 || stderr != "" || !strings.Contains(out, "malformed nodes") || strings.Contains(out, "FYI only") {
 		t.Fatalf("unacknowledged: %d %q %q", code, out, stderr)
 	}
 
