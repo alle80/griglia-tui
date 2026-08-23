@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -117,12 +118,86 @@ func (s *Store) migrate(ctx context.Context) error {
 }
 
 func (s *Store) CreateTask(ctx context.Context, t domain.Task) (domain.Task, error) {
-	r, err := s.db.ExecContext(ctx, `INSERT INTO tasks(uid,title,description,lifecycle,priority,progress,phase,completion_summary,created_at,updated_at,version) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, t.UID, t.Title, t.Description, t.Lifecycle, t.Priority, t.Progress, t.Phase, t.CompletionSummary, formatTime(t.CreatedAt), formatTime(t.UpdatedAt), t.Version)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	defer tx.Rollback()
+	r, err := tx.ExecContext(ctx, `INSERT INTO tasks(uid,title,description,lifecycle,priority,progress,phase,completion_summary,created_at,updated_at,version) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, t.UID, t.Title, t.Description, t.Lifecycle, t.Priority, t.Progress, t.Phase, t.CompletionSummary, formatTime(t.CreatedAt), formatTime(t.UpdatedAt), t.Version)
 	if err != nil {
 		return domain.Task{}, err
 	}
 	t.ID, err = r.LastInsertId()
-	return t, err
+	if err != nil {
+		return domain.Task{}, err
+	}
+	if err = insertEvent(ctx, tx, t.ID, "task_created", map[string]any{}, t.UpdatedAt); err != nil {
+		return domain.Task{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return domain.Task{}, err
+	}
+	return t, nil
+}
+
+func (s *Store) EditTask(ctx context.Context, t domain.Task, expected int64) (domain.Task, error) {
+	payload := map[string]any{"title": t.Title, "description": t.Description, "priority": t.Priority}
+	return s.mutateTask(ctx, t, expected, "task_edited", payload)
+}
+
+func (s *Store) TransitionTask(ctx context.Context, t domain.Task, expected int64, reason string) (domain.Task, error) {
+	kind := map[domain.Lifecycle]string{domain.LifecycleReady: "task_ready", domain.LifecycleDone: "task_completed", domain.LifecycleCancelled: "task_cancelled"}[t.Lifecycle]
+	payload := map[string]any{}
+	if t.Lifecycle == domain.LifecycleCancelled && reason != "" {
+		payload["reason"] = reason
+	}
+	return s.mutateTask(ctx, t, expected, kind, payload)
+}
+
+func (s *Store) mutateTask(ctx context.Context, t domain.Task, expected int64, kind string, payload map[string]any) (domain.Task, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	defer tx.Rollback()
+	r, err := tx.ExecContext(ctx, `UPDATE tasks SET title=?,description=?,lifecycle=?,priority=?,progress=?,updated_at=?,completed_at=?,cancelled_at=?,version=? WHERE id=? AND version=?`, t.Title, t.Description, t.Lifecycle, t.Priority, t.Progress, formatTime(t.UpdatedAt), nullableTime(t.CompletedAt), nullableTime(t.CancelledAt), t.Version, t.ID, expected)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	n, err := r.RowsAffected()
+	if err != nil {
+		return domain.Task{}, err
+	}
+	if n == 0 {
+		var exists int
+		if scanErr := tx.QueryRowContext(ctx, `SELECT 1 FROM tasks WHERE id=?`, t.ID).Scan(&exists); errors.Is(scanErr, sql.ErrNoRows) {
+			return domain.Task{}, domain.ErrNotFound
+		}
+		return domain.Task{}, fmt.Errorf("task changed since it was read: %w", domain.ErrConflict)
+	}
+	if err = insertEvent(ctx, tx, t.ID, kind, payload, t.UpdatedAt); err != nil {
+		return domain.Task{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return domain.Task{}, err
+	}
+	return t, nil
+}
+
+func insertEvent(ctx context.Context, tx *sql.Tx, taskID int64, kind string, payload map[string]any, at time.Time) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO events(task_id,kind,actor_kind,actor_name,payload_json,created_at) VALUES(?,?, 'human','',?,?)`, taskID, kind, string(body), formatTime(at))
+	return err
+}
+
+func nullableTime(value *time.Time) any {
+	if value == nil {
+		return nil
+	}
+	return formatTime(*value)
 }
 
 const taskColumns = `id,uid,title,description,lifecycle,priority,progress,phase,completion_summary,created_at,updated_at,completed_at,cancelled_at,version`

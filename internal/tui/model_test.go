@@ -22,6 +22,44 @@ type fakeService struct {
 	nextID  int64
 }
 
+func (f *fakeService) EditTask(_ context.Context, id int64, in app.EditTaskInput) (domain.Task, error) {
+	for i := range f.tasks {
+		if f.tasks[i].ID == id {
+			if in.Title != nil {
+				f.tasks[i].Title = *in.Title
+			}
+			if in.Description != nil {
+				f.tasks[i].Description = *in.Description
+			}
+			if in.Priority != nil {
+				f.tasks[i].Priority = *in.Priority
+			}
+			f.tasks[i].Version++
+			return f.tasks[i], nil
+		}
+	}
+	return domain.Task{}, domain.ErrNotFound
+}
+func (f *fakeService) MarkReady(_ context.Context, id int64) (domain.Task, error) {
+	return f.setLifecycle(id, domain.LifecycleReady)
+}
+func (f *fakeService) CompleteTask(_ context.Context, id int64) (domain.Task, error) {
+	return f.setLifecycle(id, domain.LifecycleDone)
+}
+func (f *fakeService) CancelTask(_ context.Context, id int64, _ string) (domain.Task, error) {
+	return f.setLifecycle(id, domain.LifecycleCancelled)
+}
+func (f *fakeService) setLifecycle(id int64, lifecycle domain.Lifecycle) (domain.Task, error) {
+	for i := range f.tasks {
+		if f.tasks[i].ID == id {
+			f.tasks[i].Lifecycle = lifecycle
+			f.tasks[i].Version++
+			return f.tasks[i], nil
+		}
+	}
+	return domain.Task{}, domain.ErrNotFound
+}
+
 func (f *fakeService) ListTasks(context.Context) ([]domain.Task, error) {
 	return append([]domain.Task(nil), f.tasks...), f.listErr
 }
@@ -155,15 +193,47 @@ func TestSuccessfulTaskCreation(t *testing.T) {
 	}
 }
 
-func TestUppercaseQIsTextInTaskForm(t *testing.T) {
-	model := load(t, New(context.Background(), &fakeService{}))
-	model, _ = update(t, model, key("n"))
-	model, cmd := update(t, model, key("Q"))
-	if cmd != nil && reflect.TypeOf(cmd()) == reflect.TypeOf(tea.Quit()) {
-		t.Fatal("uppercase Q returned the global quit command while editing")
+func TestPrintableShortcutsAreTextInEditForm(t *testing.T) {
+	for _, printable := range []string{"e", "a", "d", "x", "Q"} {
+		t.Run(printable, func(t *testing.T) {
+			service := &fakeService{tasks: []domain.Task{makeTask(1, "Original", domain.PriorityNormal, domain.LifecycleBacklog)}}
+			model := load(t, New(context.Background(), service))
+			model, _ = update(t, model, key("e"))
+			model.form.inputs[0].SetValue("")
+			model, cmd := update(t, model, key(printable))
+			assertPrintableStayedInForm(t, model, cmd, printable)
+			if service.tasks[0].Title != "Original" || service.tasks[0].Lifecycle != domain.LifecycleBacklog {
+				t.Fatalf("shortcut triggered a task action: %+v", service.tasks[0])
+			}
+		})
 	}
-	if got := model.form.inputs[0].Value(); got != "Q" {
-		t.Fatalf("title value=%q, want Q", got)
+}
+
+func TestPrintableShortcutsAreTextInCancellationReasonForm(t *testing.T) {
+	for _, printable := range []string{"e", "a", "d", "x", "Q"} {
+		t.Run(printable, func(t *testing.T) {
+			service := &fakeService{tasks: []domain.Task{makeTask(1, "Original", domain.PriorityNormal, domain.LifecycleBacklog)}}
+			model := load(t, New(context.Background(), service))
+			model, _ = update(t, model, key("x"))
+			model, cmd := update(t, model, key(printable))
+			assertPrintableStayedInForm(t, model, cmd, printable)
+			if service.tasks[0].Lifecycle != domain.LifecycleBacklog {
+				t.Fatalf("shortcut triggered cancellation: %+v", service.tasks[0])
+			}
+		})
+	}
+}
+
+func assertPrintableStayedInForm(t *testing.T, model Model, cmd tea.Cmd, want string) {
+	t.Helper()
+	if cmd != nil && reflect.TypeOf(cmd()) == reflect.TypeOf(tea.Quit()) {
+		t.Fatalf("%q returned the quit command while editing", want)
+	}
+	if model.route != routeForm {
+		t.Fatalf("%q changed route to %v", want, model.route)
+	}
+	if got := model.form.inputs[0].Value(); got != want {
+		t.Fatalf("input value=%q, want %q", got, want)
 	}
 }
 
@@ -174,6 +244,50 @@ func (repository) CreateTask(context.Context, domain.Task) (domain.Task, error) 
 }
 func (repository) ListTasks(context.Context) ([]domain.Task, error)    { return nil, nil }
 func (repository) GetTask(context.Context, int64) (domain.Task, error) { return domain.Task{}, nil }
+func (repository) EditTask(context.Context, domain.Task, int64) (domain.Task, error) {
+	return domain.Task{}, nil
+}
+func (repository) TransitionTask(context.Context, domain.Task, int64, string) (domain.Task, error) {
+	return domain.Task{}, nil
+}
+
+func TestLifecycleActionsEditAndHelp(t *testing.T) {
+	service := &fakeService{tasks: []domain.Task{makeTask(1, "First", domain.PriorityLow, domain.LifecycleBacklog), makeTask(2, "Second", domain.PriorityHigh, domain.LifecycleReady)}}
+	model := load(t, New(context.Background(), service))
+	model, _ = update(t, model, key("e"))
+	if model.route != routeForm || !model.form.editing || model.form.inputs[0].Value() != "First" {
+		t.Fatalf("edit form=%+v", model.form)
+	}
+	model.form.inputs[0].SetValue("Edited")
+	model.form.inputs[2].SetValue("urgent")
+	model.form.focus = 2
+	model, cmd := update(t, model, key("enter"))
+	model, cmd = update(t, model, cmd())
+	model, _ = update(t, model, cmd())
+	if model.selectedID != 1 || service.tasks[0].Title != "Edited" {
+		t.Fatalf("selection=%d tasks=%+v", model.selectedID, service.tasks)
+	}
+	model, cmd = update(t, model, key("a"))
+	model, cmd = update(t, model, cmd())
+	model, _ = update(t, model, cmd())
+	if service.tasks[0].Lifecycle != domain.LifecycleReady || model.selectedID != 1 {
+		t.Fatalf("ready selection=%d task=%+v", model.selectedID, service.tasks[0])
+	}
+	if view := model.helpView(); !strings.Contains(view, "mark backlog task ready") || !strings.Contains(view, "cancel backlog/ready") {
+		t.Fatalf("help=%q", view)
+	}
+	model, _ = update(t, model, key("x"))
+	if !model.form.cancelling {
+		t.Fatal("cancel should open reason form")
+	}
+	model.form.inputs[0].SetValue("superseded")
+	model, cmd = update(t, model, key("enter"))
+	model, cmd = update(t, model, cmd())
+	model, _ = update(t, model, cmd())
+	if service.tasks[0].Lifecycle != domain.LifecycleCancelled {
+		t.Fatalf("cancelled task=%+v", service.tasks[0])
+	}
+}
 
 func TestFormValidationErrorIsRecoverable(t *testing.T) {
 	model := load(t, New(context.Background(), app.New(repository{})))
