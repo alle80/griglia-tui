@@ -17,7 +17,11 @@ import (
 
 type fakeService struct {
 	tasks        []domain.Task
+	claims       map[int64]*domain.Claim
+	waiting      map[int64]bool
+	blocked      map[int64]bool
 	listErr      error
+	listCalls    int
 	addErr       error
 	added        []app.AddTaskInput
 	nextID       int64
@@ -26,6 +30,7 @@ type fakeService struct {
 	qListErr     error
 	answerErr    error
 	dependencies []domain.DependencyView
+	depListCalls []int64
 	depErr       error
 }
 
@@ -71,9 +76,10 @@ func (f *fakeService) setLifecycle(id int64, lifecycle domain.Lifecycle) (domain
 }
 
 func (f *fakeService) ListTasks(context.Context) ([]domain.TaskView, error) {
+	f.listCalls++
 	views := make([]domain.TaskView, 0, len(f.tasks))
 	for _, task := range f.tasks {
-		views = append(views, domain.NewTaskView(task, nil, false, false))
+		views = append(views, domain.NewTaskView(task, f.claims[task.ID], f.waiting[task.ID], f.blocked[task.ID]))
 	}
 	return views, f.listErr
 }
@@ -106,6 +112,7 @@ func (f *fakeService) AnswerQuestion(_ context.Context, questionID int64, answer
 }
 
 func (f *fakeService) ListDependencies(_ context.Context, taskID int64) ([]domain.DependencyView, error) {
+	f.depListCalls = append(f.depListCalls, taskID)
 	dependencies := make([]domain.DependencyView, 0, len(f.dependencies))
 	for _, d := range f.dependencies {
 		if d.TaskID == taskID {
@@ -185,12 +192,14 @@ func update(t *testing.T, model Model, msg tea.Msg) (Model, tea.Cmd) {
 
 func load(t *testing.T, model Model) Model {
 	t.Helper()
+	// Substitute the wall-clock tick with an inert stub so tests stay
+	// deterministic; auto-refresh behavior is driven by explicit tickMsg.
+	model.tick = func() tea.Cmd { return nil }
 	cmd := model.Init()
 	if cmd == nil {
 		t.Fatal("expected initial loading command")
 	}
-	model, _ = update(t, model, cmd())
-	return model
+	return runCmd(t, model, cmd)
 }
 
 func TestInitialLoadingAndEmptyList(t *testing.T) {
