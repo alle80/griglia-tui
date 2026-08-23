@@ -22,6 +22,9 @@ type fakeService struct {
 	added     []app.AddTaskInput
 	nextID    int64
 	actionErr error
+	questions []domain.Question
+	qListErr  error
+	answerErr error
 }
 
 func (f *fakeService) EditTask(_ context.Context, id int64, in app.EditTaskInput) (domain.Task, error) {
@@ -68,9 +71,36 @@ func (f *fakeService) setLifecycle(id int64, lifecycle domain.Lifecycle) (domain
 func (f *fakeService) ListTasks(context.Context) ([]domain.TaskView, error) {
 	views := make([]domain.TaskView, 0, len(f.tasks))
 	for _, task := range f.tasks {
-		views = append(views, domain.NewTaskView(task, nil))
+		views = append(views, domain.NewTaskView(task, nil, false))
 	}
 	return views, f.listErr
+}
+
+func (f *fakeService) ListQuestions(_ context.Context, taskID int64, _ domain.QuestionFilter) ([]domain.Question, error) {
+	if f.qListErr != nil {
+		return nil, f.qListErr
+	}
+	questions := make([]domain.Question, 0, len(f.questions))
+	for _, q := range f.questions {
+		if q.TaskID == taskID {
+			questions = append(questions, q)
+		}
+	}
+	return questions, nil
+}
+
+func (f *fakeService) AnswerQuestion(_ context.Context, questionID int64, answer string) (domain.Question, error) {
+	if f.answerErr != nil {
+		return domain.Question{}, f.answerErr
+	}
+	now := time.Date(2026, 8, 23, 13, 0, 0, 0, time.UTC)
+	for i := range f.questions {
+		if f.questions[i].ID == questionID {
+			f.questions[i].Answer, f.questions[i].AnsweredAt = &answer, &now
+			return f.questions[i], nil
+		}
+	}
+	return domain.Question{}, domain.ErrNotFound
 }
 
 func (f *fakeService) AddTask(_ context.Context, input app.AddTaskInput) (domain.Task, error) {
@@ -277,6 +307,18 @@ func (repository) UpdateProgress(context.Context, int64, int, string, domain.Age
 func (repository) CompleteClaimedTask(context.Context, int64, string, domain.AgentIdentity, time.Time) (domain.TaskView, error) {
 	return domain.TaskView{}, nil
 }
+func (repository) AskQuestion(context.Context, int64, string, bool, domain.AgentIdentity, time.Time) (domain.Question, error) {
+	return domain.Question{}, nil
+}
+func (repository) AnswerQuestion(context.Context, int64, string, time.Time) (domain.Question, error) {
+	return domain.Question{}, nil
+}
+func (repository) AcknowledgeQuestion(context.Context, int64, domain.AgentIdentity, time.Time) (domain.Question, error) {
+	return domain.Question{}, nil
+}
+func (repository) ListQuestions(context.Context, int64, domain.QuestionFilter) ([]domain.Question, error) {
+	return nil, nil
+}
 
 func TestLifecycleActionsEditAndHelp(t *testing.T) {
 	service := &fakeService{tasks: []domain.Task{makeTask(1, "First", domain.PriorityLow, domain.LifecycleBacklog), makeTask(2, "Second", domain.PriorityHigh, domain.LifecycleReady)}}
@@ -380,7 +422,7 @@ func TestAgentCoordinationRendering(t *testing.T) {
 	task.Progress, task.Phase = 65, "Error recovery"
 	claimed := time.Date(2026, 8, 23, 12, 30, 0, 0, time.UTC)
 	claim := &domain.Claim{TaskID: 8, AgentName: "codex", InstanceID: "session-123", ClaimedAt: claimed}
-	view := domain.NewTaskView(task, claim)
+	view := domain.NewTaskView(task, claim, false)
 	model := New(context.Background(), &fakeService{})
 	model.loading, model.tasks, model.selectedID = false, []domain.TaskView{view}, 8
 	model.restoreSelection()
@@ -404,7 +446,7 @@ func TestAgentCoordinationRendering(t *testing.T) {
 func TestClaimedTaskLifecycleConflictIsRecoverable(t *testing.T) {
 	task := makeTask(8, "Parser", domain.PriorityHigh, domain.LifecycleReady)
 	claim := &domain.Claim{TaskID: 8, AgentName: "codex", InstanceID: "session-123", ClaimedAt: time.Now().UTC()}
-	view := domain.NewTaskView(task, claim)
+	view := domain.NewTaskView(task, claim, false)
 	service := &fakeService{tasks: []domain.Task{task}, actionErr: fmt.Errorf("task is actively claimed: %w", domain.ErrConflict)}
 	model := New(context.Background(), service)
 	model.loading, model.tasks, model.selectedID = false, []domain.TaskView{view}, 8

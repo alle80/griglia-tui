@@ -174,7 +174,7 @@ func (s *state) initCommand() *cobra.Command {
 
 func (s *state) taskCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "task", Short: "Manage tasks"}
-	cmd.AddCommand(s.addCommand(), s.listCommand(), s.showCommand(), s.editCommand(), s.readyCommand(), s.doneCommand(), s.cancelCommand(), s.claimCommand(), s.claimNextCommand(), s.releaseCommand(), s.progressCommand())
+	cmd.AddCommand(s.addCommand(), s.listCommand(), s.showCommand(), s.editCommand(), s.readyCommand(), s.doneCommand(), s.cancelCommand(), s.claimCommand(), s.claimNextCommand(), s.releaseCommand(), s.progressCommand(), s.askCommand(), s.answerCommand(), s.questionsCommand(), s.acknowledgeCommand())
 	return cmd
 }
 
@@ -355,6 +355,155 @@ func (s *state) progressCommand() *cobra.Command {
 	return cmd
 }
 
+func questionID(value string) (int64, error) {
+	id, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || id < 1 {
+		return 0, &commandError{2, "invalid_input", "question ID must be a positive integer"}
+	}
+	return id, nil
+}
+
+func (s *state) askCommand() *cobra.Command {
+	var agent, instance string
+	var blocking bool
+	cmd := &cobra.Command{Use: "ask ID BODY", Short: "Ask a task-scoped question as the owning agent", Args: exactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
+		id, err := taskID(args[0])
+		if err != nil {
+			return err
+		}
+		service, closeFn, err := s.service()
+		if err != nil {
+			return err
+		}
+		defer closeFn()
+		q, err := service.AskQuestion(cmd.Context(), id, args[1], blocking, domain.AgentIdentity{AgentName: agent, InstanceID: instance})
+		if err != nil {
+			return err
+		}
+		return s.writeQuestion("Asked", q)
+	}}
+	identityFlags(cmd, &agent, &instance)
+	cmd.Flags().BoolVar(&blocking, "blocking", false, "the question blocks work until answered")
+	return cmd
+}
+
+func (s *state) answerCommand() *cobra.Command {
+	cmd := &cobra.Command{Use: "answer QUESTION_ID ANSWER", Short: "Answer a task question as the human", Args: exactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
+		id, err := questionID(args[0])
+		if err != nil {
+			return err
+		}
+		service, closeFn, err := s.service()
+		if err != nil {
+			return err
+		}
+		defer closeFn()
+		q, err := service.AnswerQuestion(cmd.Context(), id, args[1])
+		if err != nil {
+			return err
+		}
+		return s.writeQuestion("Answered", q)
+	}}
+	return cmd
+}
+
+func (s *state) acknowledgeCommand() *cobra.Command {
+	var agent, instance string
+	cmd := &cobra.Command{Use: "acknowledge QUESTION_ID", Short: "Acknowledge an answered question as the asking agent", Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		id, err := questionID(args[0])
+		if err != nil {
+			return err
+		}
+		service, closeFn, err := s.service()
+		if err != nil {
+			return err
+		}
+		defer closeFn()
+		q, err := service.AcknowledgeQuestion(cmd.Context(), id, domain.AgentIdentity{AgentName: agent, InstanceID: instance})
+		if err != nil {
+			return err
+		}
+		return s.writeQuestion("Acknowledged", q)
+	}}
+	identityFlags(cmd, &agent, &instance)
+	return cmd
+}
+
+func (s *state) questionsCommand() *cobra.Command {
+	var unanswered, unacknowledged bool
+	cmd := &cobra.Command{Use: "questions ID", Short: "List a task's questions", Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		id, err := taskID(args[0])
+		if err != nil {
+			return err
+		}
+		if unanswered && unacknowledged {
+			return &commandError{2, "invalid_input", "choose at most one of --unanswered and --unacknowledged"}
+		}
+		filter := domain.QuestionsAll
+		if unanswered {
+			filter = domain.QuestionsUnanswered
+		}
+		if unacknowledged {
+			filter = domain.QuestionsUnacknowledged
+		}
+		service, closeFn, err := s.service()
+		if err != nil {
+			return err
+		}
+		defer closeFn()
+		questions, err := service.ListQuestions(cmd.Context(), id, filter)
+		if err != nil {
+			return err
+		}
+		if s.json {
+			dto := make([]questionDTO, 0, len(questions))
+			for _, q := range questions {
+				dto = append(dto, toQuestionDTO(q))
+			}
+			return writeJSON(s.out, map[string]any{"questions": dto}, nil)
+		}
+		if len(questions) == 0 {
+			_, err = fmt.Fprintln(s.out, "No questions.")
+			return err
+		}
+		for _, q := range questions {
+			if _, err = fmt.Fprintf(s.out, "#%-4d %-8s %-12s %s\n", q.ID, questionKindLabel(q.Blocking), questionStateLabel(q), q.Body); err != nil {
+				return err
+			}
+		}
+		return nil
+	}}
+	cmd.Flags().BoolVar(&unanswered, "unanswered", false, "only questions without an answer")
+	cmd.Flags().BoolVar(&unacknowledged, "unacknowledged", false, "only questions the agent has not acknowledged")
+	return cmd
+}
+
+func questionKindLabel(blocking bool) string {
+	if blocking {
+		return "blocking"
+	}
+	return "info"
+}
+
+func questionStateLabel(q domain.Question) string {
+	switch {
+	case q.Acknowledged():
+		return "acknowledged"
+	case q.Answered():
+		return "answered"
+	default:
+		return "unanswered"
+	}
+}
+
+func (s *state) writeQuestion(verb string, q domain.Question) error {
+	if s.json {
+		return writeJSON(s.out, map[string]any{"question": toQuestionDTO(q)}, nil)
+	}
+	_, err := fmt.Fprintf(s.out, "%s question #%d on task #%d: %s\n", verb, q.ID, q.TaskID, q.Body)
+	return err
+}
+
 func (s *state) cancelCommand() *cobra.Command {
 	var reason string
 	cmd := &cobra.Command{Use: "cancel ID", Short: "Cancel a task", Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
@@ -398,7 +547,7 @@ func (s *state) transitionCommand(use, short, verb string, run func(context.Cont
 
 func (s *state) writeTaskMutation(verb string, t domain.Task) error {
 	if s.json {
-		return writeJSON(s.out, map[string]any{"task": toTaskDTO(domain.NewTaskView(t, nil))}, nil)
+		return writeJSON(s.out, map[string]any{"task": toTaskDTO(domain.NewTaskView(t, nil, false))}, nil)
 	}
 	_, err := fmt.Fprintf(s.out, "%s task #%d: %s\n", verb, t.ID, t.Title)
 	return err
@@ -434,7 +583,7 @@ func (s *state) addCommand() *cobra.Command {
 			return err
 		}
 		if s.json {
-			return writeJSON(s.out, map[string]any{"task": toTaskDTO(domain.NewTaskView(t, nil))}, nil)
+			return writeJSON(s.out, map[string]any{"task": toTaskDTO(domain.NewTaskView(t, nil, false))}, nil)
 		}
 		_, err = fmt.Fprintf(s.out, "Added task #%d: %s\n", t.ID, t.Title)
 		return err
@@ -556,6 +705,36 @@ type claimDTO struct {
 	ClaimedAt  string `json:"claimed_at"`
 }
 
+type askedByDTO struct {
+	AgentName  string `json:"agent_name"`
+	InstanceID string `json:"instance_id"`
+}
+
+type questionDTO struct {
+	ID             int64      `json:"id"`
+	TaskID         int64      `json:"task_id"`
+	Body           string     `json:"body"`
+	Blocking       bool       `json:"blocking"`
+	AskedBy        askedByDTO `json:"asked_by"`
+	AskedAt        string     `json:"asked_at"`
+	Answer         *string    `json:"answer"`
+	AnsweredAt     *string    `json:"answered_at"`
+	AcknowledgedAt *string    `json:"acknowledged_at"`
+}
+
+func toQuestionDTO(q domain.Question) questionDTO {
+	d := questionDTO{ID: q.ID, TaskID: q.TaskID, Body: q.Body, Blocking: q.Blocking, AskedBy: askedByDTO{AgentName: q.AskedBy.AgentName, InstanceID: q.AskedBy.InstanceID}, AskedAt: formatJSONTime(q.AskedAt), Answer: q.Answer}
+	if q.AnsweredAt != nil {
+		v := formatJSONTime(*q.AnsweredAt)
+		d.AnsweredAt = &v
+	}
+	if q.AcknowledgedAt != nil {
+		v := formatJSONTime(*q.AcknowledgedAt)
+		d.AcknowledgedAt = &v
+	}
+	return d
+}
+
 func toTaskDTO(view domain.TaskView) taskDTO {
 	t := view.Task
 	d := taskDTO{ID: t.ID, UID: t.UID, Title: t.Title, Description: t.Description, Lifecycle: t.Lifecycle, Priority: t.Priority, Progress: t.Progress, Phase: t.Phase, CompletionSummary: t.CompletionSummary, CreatedAt: formatJSONTime(t.CreatedAt), UpdatedAt: formatJSONTime(t.UpdatedAt), Version: t.Version}
@@ -596,7 +775,13 @@ func mapError(err error) *commandError {
 		return &commandError{3, "project_not_initialized", "no .griglia/griglia.db found"}
 	}
 	if errors.Is(err, domain.ErrNotFound) {
-		return &commandError{4, "not_found", "task not found"}
+		// Wrapped variants carry their own subject ("question not found");
+		// the bare sentinel keeps the historical task message.
+		message := "task not found"
+		if err.Error() != domain.ErrNotFound.Error() {
+			message = err.Error()
+		}
+		return &commandError{4, "not_found", message}
 	}
 	if errors.Is(err, domain.ErrInvalid) {
 		return &commandError{2, "invalid_input", err.Error()}

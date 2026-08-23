@@ -35,7 +35,7 @@ func TestMigrationAndReopen(t *testing.T) {
 	if err = s.db.QueryRow("SELECT MAX(version) FROM schema_migrations").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 3 {
+	if version != 4 {
 		t.Fatalf("version=%d", version)
 	}
 	if err = s.Close(); err != nil {
@@ -91,7 +91,7 @@ func TestMigrationsFromExistingV1Database(t *testing.T) {
 	}
 	defer s.Close()
 	var version int
-	if err = s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 3 {
+	if err = s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 4 {
 		t.Fatalf("version=%d err=%v", version, err)
 	}
 	if _, err = s.db.Exec(`INSERT INTO events(kind,actor_kind,payload_json,created_at) VALUES('probe','human','{}',?)`, formatTime(time.Now().UTC())); err != nil {
@@ -137,12 +137,67 @@ func TestMigration003FromExistingV2Database(t *testing.T) {
 	}
 	defer s.Close()
 	var version int
-	if err = s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 3 {
+	if err = s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 4 {
 		t.Fatalf("version=%d err=%v", version, err)
 	}
 	var table string
 	if err = s.db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='claims'`).Scan(&table); err != nil || table != "claims" {
 		t.Fatalf("claims=%q err=%v", table, err)
+	}
+}
+
+func TestMigration004FromExistingV3Database(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v3.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	for version, name := range []string{"001_initial.sql", "002_events.sql", "003_claims.sql"} {
+		body, readErr := migrationFiles.ReadFile("migrations/" + name)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if _, err = db.Exec(string(body)); err != nil {
+			t.Fatal(err)
+		}
+		checksum := fmt.Sprintf("%x", sha256.Sum256(body))
+		if _, err = db.Exec(`INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)`, version+1, checksum, formatTime(time.Now().UTC())); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := formatTime(time.Now().UTC())
+	if _, err = db.Exec(`INSERT INTO tasks(uid,title,description,lifecycle,priority,progress,phase,completion_summary,created_at,updated_at,version) VALUES('m4','Milestone 4 task','','ready','normal',0,'','',?,?,1)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var version int
+	if err = s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 4 {
+		t.Fatalf("version=%d err=%v", version, err)
+	}
+	view, err := s.GetTask(context.Background(), 1)
+	if err != nil || view.Title != "Milestone 4 task" || *view.OperationalState != domain.OperationalAvailable {
+		t.Fatalf("existing task=%+v err=%v", view, err)
+	}
+	questions, err := s.ListQuestions(context.Background(), 1, domain.QuestionsAll)
+	if err != nil || len(questions) != 0 {
+		t.Fatalf("questions=%v err=%v", questions, err)
 	}
 }
 
@@ -304,11 +359,19 @@ func TestListTasksIncludesOnlyActiveClaimsInSingleQuery(t *testing.T) {
 
 func TestListTasksQueryJoinsActiveClaims(t *testing.T) {
 	normalized := strings.Join(strings.Fields(strings.ToLower(listTasksQuery)), " ")
-	if strings.Count(normalized, "select ") != 1 {
-		t.Fatalf("list query must remain a single select: %s", normalized)
+	// One outer select over tasks plus the correlated questions EXISTS —
+	// never a per-task query issued from Go.
+	if strings.Count(normalized, "select ") != 2 {
+		t.Fatalf("list query must remain a single statement: %s", normalized)
+	}
+	if strings.Count(normalized, "from tasks") != 1 {
+		t.Fatalf("list query must read tasks exactly once: %s", normalized)
 	}
 	if !strings.Contains(normalized, "left join claims on claims.task_id=tasks.id and claims.released_at is null") {
 		t.Fatalf("list query must join active claims: %s", normalized)
+	}
+	if !strings.Contains(normalized, "exists(select 1 from questions where questions.task_id=tasks.id and questions.blocking=1 and questions.answered_at is null)") {
+		t.Fatalf("list query must derive unanswered blocking questions inline: %s", normalized)
 	}
 }
 

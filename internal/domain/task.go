@@ -106,8 +106,9 @@ type Claim struct {
 type OperationalState string
 
 const (
-	OperationalAvailable OperationalState = "available"
-	OperationalWorking   OperationalState = "working"
+	OperationalAvailable       OperationalState = "available"
+	OperationalWorking         OperationalState = "working"
+	OperationalWaitingForHuman OperationalState = "waiting_for_human"
 )
 
 type TaskView struct {
@@ -116,11 +117,14 @@ type TaskView struct {
 	ActiveClaim      *Claim
 }
 
-func NewTaskView(task Task, claim *Claim) TaskView {
+func NewTaskView(task Task, claim *Claim, unansweredBlocking bool) TaskView {
 	view := TaskView{Task: task, ActiveClaim: claim}
 	if task.Lifecycle == LifecycleReady {
 		state := OperationalAvailable
-		if claim != nil {
+		switch {
+		case claim != nil && unansweredBlocking:
+			state = OperationalWaitingForHuman
+		case claim != nil:
 			state = OperationalWorking
 		}
 		view.OperationalState = &state

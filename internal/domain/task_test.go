@@ -41,16 +41,36 @@ func TestAgentIdentityAndOperationalState(t *testing.T) {
 		}
 	}
 	task := Task{Lifecycle: LifecycleReady}
-	view := NewTaskView(task, nil)
+	view := NewTaskView(task, nil, false)
 	if view.OperationalState == nil || *view.OperationalState != OperationalAvailable {
 		t.Fatalf("available=%+v", view)
 	}
 	claim := &Claim{AgentName: "codex", InstanceID: "one"}
-	view = NewTaskView(task, claim)
+	view = NewTaskView(task, claim, false)
 	if view.OperationalState == nil || *view.OperationalState != OperationalWorking || view.ActiveClaim != claim {
 		t.Fatalf("working=%+v", view)
 	}
-	if view = NewTaskView(Task{Lifecycle: LifecycleDone}, nil); view.OperationalState != nil {
+	if view = NewTaskView(Task{Lifecycle: LifecycleDone}, nil, false); view.OperationalState != nil {
 		t.Fatalf("terminal state=%+v", view)
+	}
+}
+
+func TestWaitingForHumanDerivation(t *testing.T) {
+	task := Task{Lifecycle: LifecycleReady}
+	claim := &Claim{AgentName: "codex", InstanceID: "one"}
+	view := NewTaskView(task, claim, true)
+	if view.OperationalState == nil || *view.OperationalState != OperationalWaitingForHuman {
+		t.Fatalf("waiting takes precedence over working, got %+v", view)
+	}
+	// An unanswered blocking question without a claim does not hide availability.
+	view = NewTaskView(task, nil, true)
+	if view.OperationalState == nil || *view.OperationalState != OperationalAvailable {
+		t.Fatalf("available=%+v", view)
+	}
+	if view = NewTaskView(Task{Lifecycle: LifecycleDone}, nil, true); view.OperationalState != nil {
+		t.Fatalf("terminal state=%+v", view)
+	}
+	if view = NewTaskView(Task{Lifecycle: LifecycleBacklog}, nil, true); view.OperationalState != nil {
+		t.Fatalf("backlog state=%+v", view)
 	}
 }

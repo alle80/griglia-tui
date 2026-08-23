@@ -20,10 +20,10 @@ func (r *memoryRepository) CreateTask(context.Context, domain.Task) (domain.Task
 	return domain.Task{}, nil
 }
 func (r *memoryRepository) ListTasks(context.Context) ([]domain.TaskView, error) {
-	return []domain.TaskView{domain.NewTaskView(r.task, nil)}, nil
+	return []domain.TaskView{domain.NewTaskView(r.task, nil, false)}, nil
 }
 func (r *memoryRepository) GetTask(context.Context, int64) (domain.TaskView, error) {
-	return domain.NewTaskView(r.task, nil), nil
+	return domain.NewTaskView(r.task, nil, false), nil
 }
 func (r *memoryRepository) EditTask(_ context.Context, task domain.Task, expected int64) (domain.Task, error) {
 	if r.conflict {
@@ -53,6 +53,18 @@ func (r *memoryRepository) UpdateProgress(context.Context, int64, int, string, d
 }
 func (r *memoryRepository) CompleteClaimedTask(context.Context, int64, string, domain.AgentIdentity, time.Time) (domain.TaskView, error) {
 	return domain.TaskView{}, nil
+}
+func (r *memoryRepository) AskQuestion(_ context.Context, taskID int64, body string, blocking bool, identity domain.AgentIdentity, now time.Time) (domain.Question, error) {
+	return domain.Question{ID: 1, TaskID: taskID, Body: body, Blocking: blocking, AskedBy: identity, AskedAt: now}, nil
+}
+func (r *memoryRepository) AnswerQuestion(_ context.Context, questionID int64, answer string, now time.Time) (domain.Question, error) {
+	return domain.Question{ID: questionID, Answer: &answer, AnsweredAt: &now}, nil
+}
+func (r *memoryRepository) AcknowledgeQuestion(_ context.Context, questionID int64, identity domain.AgentIdentity, now time.Time) (domain.Question, error) {
+	return domain.Question{ID: questionID, AskedBy: identity, AcknowledgedAt: &now}, nil
+}
+func (r *memoryRepository) ListQuestions(context.Context, int64, domain.QuestionFilter) ([]domain.Question, error) {
+	return nil, nil
 }
 
 func TestEditAndLifecycleSemantics(t *testing.T) {
