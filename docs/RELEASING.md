@@ -63,5 +63,11 @@ publishing are deliberate manual steps.
 go build -ldflags "-X main.version=X.Y.Z -X main.commit=<sha> -X main.date=<utc>"
 ```
 
-Development builds report `dev (commit unknown, built unknown)`; nothing at
-runtime ever requires Git.
+When link-time metadata is absent, `griglia version` falls back to the build
+information the Go toolchain embeds in the binary: `go install
+github.com/alle80/griglia-tui/cmd/griglia@vX.Y.Z` reports `X.Y.Z` (commit and
+build date stay `unknown` — the module zip carries no VCS data), and a plain
+`go build` in a checkout reports the stamped module version plus the VCS
+commit and time, with `+dirty` marking a modified tree. Builds with no
+embedded metadata at all still report `dev (commit unknown, built unknown)`.
+Nothing at runtime ever requires Git.
