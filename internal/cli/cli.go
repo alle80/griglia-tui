@@ -191,7 +191,17 @@ func (s *state) initCommand() *cobra.Command {
 }
 
 func (s *state) taskCommand() *cobra.Command {
-	cmd := &cobra.Command{Use: "task", Short: "Manage tasks"}
+	// Without RunE, cobra treats an unknown subcommand as a request for help
+	// on stdout with exit 0, which would corrupt the JSON protocol stream.
+	cmd := &cobra.Command{Use: "task", Short: "Manage tasks", RunE: func(cmd *cobra.Command, args []string) error {
+		if len(args) > 0 {
+			return &commandError{2, "invalid_input", fmt.Sprintf("unknown command %q for %q", args[0], cmd.CommandPath())}
+		}
+		if s.json {
+			return &commandError{2, "invalid_input", "task requires a subcommand"}
+		}
+		return cmd.Help()
+	}}
 	cmd.AddCommand(s.addCommand(), s.listCommand(), s.showCommand(), s.editCommand(), s.readyCommand(), s.doneCommand(), s.cancelCommand(), s.claimCommand(), s.claimNextCommand(), s.releaseCommand(), s.progressCommand(), s.askCommand(), s.answerCommand(), s.questionsCommand(), s.acknowledgeCommand(), s.dependCommand(), s.undependCommand(), s.dependenciesCommand())
 	return cmd
 }
