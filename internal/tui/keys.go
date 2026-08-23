@@ -3,12 +3,14 @@ package tui
 import tea "charm.land/bubbletea/v2"
 
 type keymap struct {
-	Down, Up, Open, New, Edit, Ready, Done, Cancel, Questions, Depends, Refresh, Help, Back, Quit, ForceQuit []string
+	Down, Up, PageDown, PageUp, Open, New, Edit, Ready, Done, Cancel, Questions, Depends, Refresh, Help, Back, Quit, ForceQuit []string
 }
 
 var keys = keymap{
 	Down:      []string{"j", "down"},
 	Up:        []string{"k", "up"},
+	PageDown:  []string{"pgdown"},
+	PageUp:    []string{"pgup"},
 	Open:      []string{"enter"},
 	New:       []string{"n"},
 	Edit:      []string{"e"},
