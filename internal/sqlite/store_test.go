@@ -237,6 +237,81 @@ func TestTasksOrderedAndLookedUp(t *testing.T) {
 	}
 }
 
+func TestListTasksIncludesOnlyActiveClaimsInSingleQuery(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	create := func(uid string, lifecycle domain.Lifecycle, priority domain.Priority, offset time.Duration) domain.Task {
+		t.Helper()
+		task, err := s.CreateTask(ctx, domain.Task{UID: uid, Title: uid, Lifecycle: lifecycle, Priority: priority, CreatedAt: base.Add(offset), UpdatedAt: base.Add(offset), Version: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return task
+	}
+	backlog := create("backlog", domain.LifecycleBacklog, domain.PriorityUrgent, 0)
+	claimed := create("claimed", domain.LifecycleReady, domain.PriorityHigh, time.Second)
+	historical := create("historical", domain.LifecycleReady, domain.PriorityNormal, 2*time.Second)
+	unclaimed := create("unclaimed", domain.LifecycleReady, domain.PriorityLow, 3*time.Second)
+
+	activeOwner := domain.AgentIdentity{AgentName: "codex", InstanceID: "active-instance"}
+	activeView, err := s.ClaimTask(ctx, claimed.ID, activeOwner, base.Add(4*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	historicalOwner := domain.AgentIdentity{AgentName: "claude", InstanceID: "released-instance"}
+	if _, err = s.ClaimTask(ctx, historical.ID, historicalOwner, base.Add(5*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.ReleaseClaim(ctx, historical.ID, historicalOwner, "handoff", base.Add(6*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	views, err := s.ListTasks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOrder := []int64{backlog.ID, claimed.ID, historical.ID, unclaimed.ID}
+	if len(views) != len(wantOrder) {
+		t.Fatalf("len=%d want=%d", len(views), len(wantOrder))
+	}
+	seen := make(map[int64]bool, len(views))
+	for i, view := range views {
+		if view.ID != wantOrder[i] {
+			t.Fatalf("order[%d]=%d want=%d", i, view.ID, wantOrder[i])
+		}
+		if seen[view.ID] {
+			t.Fatalf("task %d appeared more than once", view.ID)
+		}
+		seen[view.ID] = true
+	}
+	if views[0].OperationalState != nil || views[0].ActiveClaim != nil {
+		t.Fatalf("backlog view=%+v", views[0])
+	}
+	if views[1].OperationalState == nil || *views[1].OperationalState != domain.OperationalWorking {
+		t.Fatalf("claimed state=%v", views[1].OperationalState)
+	}
+	if views[1].ActiveClaim == nil || views[1].ActiveClaim.ID != activeView.ActiveClaim.ID || views[1].ActiveClaim.TaskID != claimed.ID || views[1].ActiveClaim.AgentName != activeOwner.AgentName || views[1].ActiveClaim.InstanceID != activeOwner.InstanceID || !views[1].ActiveClaim.ClaimedAt.Equal(base.Add(4*time.Second)) || views[1].ActiveClaim.ReleasedAt != nil {
+		t.Fatalf("active claim=%+v", views[1].ActiveClaim)
+	}
+	for _, index := range []int{2, 3} {
+		if views[index].OperationalState == nil || *views[index].OperationalState != domain.OperationalAvailable || views[index].ActiveClaim != nil {
+			t.Fatalf("unclaimed ready view=%+v", views[index])
+		}
+	}
+}
+
+func TestListTasksQueryJoinsActiveClaims(t *testing.T) {
+	normalized := strings.Join(strings.Fields(strings.ToLower(listTasksQuery)), " ")
+	if strings.Count(normalized, "select ") != 1 {
+		t.Fatalf("list query must remain a single select: %s", normalized)
+	}
+	if !strings.Contains(normalized, "left join claims on claims.task_id=tasks.id and claims.released_at is null") {
+		t.Fatalf("list query must join active claims: %s", normalized)
+	}
+}
+
 func TestBasicConcurrentAccess(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.db")
 	s1, err := Open(path)

@@ -206,23 +206,27 @@ func nullableTime(value *time.Time) any {
 
 const taskColumns = `id,uid,title,description,lifecycle,priority,progress,phase,completion_summary,created_at,updated_at,completed_at,cancelled_at,version`
 
+const listTaskColumns = `tasks.id,tasks.uid,tasks.title,tasks.description,tasks.lifecycle,tasks.priority,tasks.progress,tasks.phase,tasks.completion_summary,tasks.created_at,tasks.updated_at,tasks.completed_at,tasks.cancelled_at,tasks.version`
+
+const listTasksQuery = `SELECT ` + listTaskColumns + `,
+claims.id,claims.task_id,claims.agent_name,claims.instance_id,claims.claimed_at,claims.released_at
+FROM tasks
+LEFT JOIN claims ON claims.task_id=tasks.id AND claims.released_at IS NULL
+ORDER BY CASE priority WHEN 'urgent' THEN 4 WHEN 'high' THEN 3 WHEN 'normal' THEN 2 ELSE 1 END DESC, created_at ASC, tasks.id ASC`
+
 func (s *Store) ListTasks(ctx context.Context) ([]domain.TaskView, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+taskColumns+` FROM tasks ORDER BY CASE priority WHEN 'urgent' THEN 4 WHEN 'high' THEN 3 WHEN 'normal' THEN 2 ELSE 1 END DESC, created_at ASC, id ASC`)
+	rows, err := s.db.QueryContext(ctx, listTasksQuery)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	tasks := make([]domain.TaskView, 0)
 	for rows.Next() {
-		t, scanErr := scanTask(rows)
+		view, scanErr := scanTaskView(rows)
 		if scanErr != nil {
 			return nil, scanErr
 		}
-		claim, claimErr := s.activeClaim(ctx, t.ID)
-		if claimErr != nil {
-			return nil, claimErr
-		}
-		tasks = append(tasks, domain.NewTaskView(t, claim))
+		tasks = append(tasks, view)
 	}
 	return tasks, rows.Err()
 }
@@ -470,10 +474,55 @@ func scanTask(row scanner) (domain.Task, error) {
 	var t domain.Task
 	var created, updated string
 	var completed, cancelled sql.NullString
-	err := row.Scan(&t.ID, &t.UID, &t.Title, &t.Description, &t.Lifecycle, &t.Priority, &t.Progress, &t.Phase, &t.CompletionSummary, &created, &updated, &completed, &cancelled, &t.Version)
+	err := row.Scan(taskScanDestinations(&t, &created, &updated, &completed, &cancelled)...)
 	if err != nil {
 		return t, err
 	}
+	return parseTaskTimes(t, created, updated, completed, cancelled)
+}
+
+func scanTaskView(row scanner) (domain.TaskView, error) {
+	var task domain.Task
+	var created, updated string
+	var completed, cancelled sql.NullString
+	var claimID, claimTaskID sql.NullInt64
+	var agentName, instanceID, claimed, released sql.NullString
+	destinations := taskScanDestinations(&task, &created, &updated, &completed, &cancelled)
+	destinations = append(destinations, &claimID, &claimTaskID, &agentName, &instanceID, &claimed, &released)
+	if err := row.Scan(destinations...); err != nil {
+		return domain.TaskView{}, err
+	}
+	parsedTask, err := parseTaskTimes(task, created, updated, completed, cancelled)
+	if err != nil {
+		return domain.TaskView{}, err
+	}
+	if !claimID.Valid {
+		return domain.NewTaskView(parsedTask, nil), nil
+	}
+	if !claimTaskID.Valid || !agentName.Valid || !instanceID.Valid || !claimed.Valid {
+		return domain.TaskView{}, errors.New("active claim has null required columns")
+	}
+	claimedAt, err := parseTime(claimed.String)
+	if err != nil {
+		return domain.TaskView{}, err
+	}
+	claim := &domain.Claim{ID: claimID.Int64, TaskID: claimTaskID.Int64, AgentName: agentName.String, InstanceID: instanceID.String, ClaimedAt: claimedAt}
+	if released.Valid {
+		releasedAt, parseErr := parseTime(released.String)
+		if parseErr != nil {
+			return domain.TaskView{}, parseErr
+		}
+		claim.ReleasedAt = &releasedAt
+	}
+	return domain.NewTaskView(parsedTask, claim), nil
+}
+
+func taskScanDestinations(t *domain.Task, created, updated *string, completed, cancelled *sql.NullString) []any {
+	return []any{&t.ID, &t.UID, &t.Title, &t.Description, &t.Lifecycle, &t.Priority, &t.Progress, &t.Phase, &t.CompletionSummary, created, updated, completed, cancelled, &t.Version}
+}
+
+func parseTaskTimes(t domain.Task, created, updated string, completed, cancelled sql.NullString) (domain.Task, error) {
+	var err error
 	if t.CreatedAt, err = parseTime(created); err != nil {
 		return t, err
 	}
