@@ -17,7 +17,26 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.sizeForm()
 		return m, nil
+	case tickMsg:
+		var refresh tea.Cmd
+		m, refresh = m.autoRefresh()
+		if refresh == nil {
+			return m, m.tick()
+		}
+		return m, tea.Batch(m.tick(), refresh)
 	case tasksLoadedMsg:
+		if msg.background {
+			m.refreshing = false
+			// A foreground reload in flight will deliver fresher data;
+			// applying this result now could briefly resurrect stale state.
+			if msg.err != nil || m.loading {
+				return m, nil
+			}
+			m.err = nil
+			m.tasks = msg.tasks
+			m.restoreSelection()
+			return m, nil
+		}
 		m.loading = false
 		if msg.err != nil {
 			m.err = msg.err
@@ -56,6 +75,14 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.taskID != m.questionsTaskID {
 			return m, nil
 		}
+		if msg.background {
+			if msg.err != nil || m.questionsLoading {
+				return m, nil
+			}
+			m.questions = msg.questions
+			m.restoreQuestionSelection()
+			return m, nil
+		}
 		m.questionsLoading = false
 		if msg.err != nil {
 			m.actionErr = msg.err
@@ -81,6 +108,14 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.loadQuestions(m.questionsTaskID), m.loadTasks())
 	case dependenciesLoadedMsg:
 		if msg.taskID != m.dependenciesTaskID {
+			return m, nil
+		}
+		if msg.background {
+			if msg.err != nil || m.dependenciesLoad {
+				return m, nil
+			}
+			m.dependencies = msg.dependencies
+			m.restoreDependencySelection()
 			return m, nil
 		}
 		m.dependenciesLoad = false

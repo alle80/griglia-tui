@@ -163,7 +163,7 @@ Integration guidance for agents lives in
 | `x` | cancel with optional reason |
 | `w` | view and answer questions |
 | `b` | inspect and edit dependencies |
-| `r` | refresh (picks up external agent activity) |
+| `r` | refresh immediately (external agent activity is also picked up automatically about once per second) |
 | `?` | help |
 | `q`/`esc` | back |
 | `Q` / `ctrl+c` | quit |

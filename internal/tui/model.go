@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"time"
 
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
@@ -9,6 +10,10 @@ import (
 	"github.com/alle80/griglia-tui/internal/app"
 	"github.com/alle80/griglia-tui/internal/domain"
 )
+
+// refreshInterval is the cadence of the automatic background refresh that
+// keeps the TUI in sync with changes made by external agent processes.
+const refreshInterval = time.Second
 
 type Service interface {
 	ListTasks(context.Context) ([]domain.TaskView, error)
@@ -35,9 +40,19 @@ const (
 	routeDependencies
 )
 
+// tickMsg drives the auto-refresh loop. Exactly one tick is ever in flight:
+// Init schedules the first and each handled tick schedules the next.
+type tickMsg struct{}
+
+// The background flag marks results produced by the auto-refresh loop. They
+// update data in place without touching loading indicators, routes, or focus,
+// and they are discarded whenever a foreground load of the same data is in
+// flight or the refresh failed, so a transient storage error can never
+// destroy the visible state.
 type tasksLoadedMsg struct {
-	tasks []domain.TaskView
-	err   error
+	tasks      []domain.TaskView
+	background bool
+	err        error
 }
 
 type taskCreatedMsg struct {
@@ -52,9 +67,10 @@ type taskMutatedMsg struct {
 }
 
 type questionsLoadedMsg struct {
-	taskID    int64
-	questions []domain.Question
-	err       error
+	taskID     int64
+	questions  []domain.Question
+	background bool
+	err        error
 }
 
 type questionAnsweredMsg struct {
@@ -65,6 +81,7 @@ type questionAnsweredMsg struct {
 type dependenciesLoadedMsg struct {
 	taskID       int64
 	dependencies []domain.DependencyView
+	background   bool
 	err          error
 }
 
@@ -102,6 +119,8 @@ type Model struct {
 	dependenciesTaskID int64
 	dependenciesFrom   route
 	dependenciesLoad   bool
+	refreshing         bool
+	tick               func() tea.Cmd
 }
 
 type formModel struct {
@@ -159,6 +178,11 @@ func New(ctx context.Context, service Service) Model {
 		ctx = context.Background()
 	}
 	model := Model{ctx: ctx, service: service, route: routeList, loading: true, width: 80, height: 24, form: newForm()}
+	// The tick command is a field so tests can substitute a deterministic
+	// stub; production always schedules the next wall-clock tick.
+	model.tick = func() tea.Cmd {
+		return tea.Tick(refreshInterval, func(time.Time) tea.Msg { return tickMsg{} })
+	}
 	model.sizeForm()
 	return model
 }
@@ -180,12 +204,52 @@ func newForm() formModel {
 	return f
 }
 
-func (m Model) Init() tea.Cmd { return m.loadTasks() }
+func (m Model) Init() tea.Cmd { return tea.Batch(m.loadTasks(), m.tick()) }
 
 func (m Model) loadTasks() tea.Cmd {
 	return func() tea.Msg {
 		tasks, err := m.service.ListTasks(m.ctx)
 		return tasksLoadedMsg{tasks: tasks, err: err}
+	}
+}
+
+// autoRefresh starts one background refresh of the data behind the current
+// view. It is skipped while a form is open (never disturb typing), while a
+// previous background refresh is still in flight, and while a foreground
+// load is already running — so refresh requests can never pile up.
+func (m Model) autoRefresh() (Model, tea.Cmd) {
+	if m.route == routeForm || m.refreshing || m.loading {
+		return m, nil
+	}
+	m.refreshing = true
+	commands := []tea.Cmd{m.refreshTasks()}
+	switch m.route {
+	case routeQuestions:
+		commands = append(commands, m.refreshQuestions(m.questionsTaskID))
+	case routeDetail, routeDependencies:
+		commands = append(commands, m.refreshDependencies(m.dependenciesTaskID))
+	}
+	return m, tea.Batch(commands...)
+}
+
+func (m Model) refreshTasks() tea.Cmd {
+	return func() tea.Msg {
+		tasks, err := m.service.ListTasks(m.ctx)
+		return tasksLoadedMsg{tasks: tasks, background: true, err: err}
+	}
+}
+
+func (m Model) refreshQuestions(taskID int64) tea.Cmd {
+	return func() tea.Msg {
+		questions, err := m.service.ListQuestions(m.ctx, taskID, domain.QuestionsAll)
+		return questionsLoadedMsg{taskID: taskID, questions: questions, background: true, err: err}
+	}
+}
+
+func (m Model) refreshDependencies(taskID int64) tea.Cmd {
+	return func() tea.Msg {
+		dependencies, err := m.service.ListDependencies(m.ctx, taskID)
+		return dependenciesLoadedMsg{taskID: taskID, dependencies: dependencies, background: true, err: err}
 	}
 }
 
