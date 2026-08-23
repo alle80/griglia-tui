@@ -11,7 +11,7 @@ import (
 )
 
 type Service interface {
-	ListTasks(context.Context) ([]domain.Task, error)
+	ListTasks(context.Context) ([]domain.TaskView, error)
 	AddTask(context.Context, app.AddTaskInput) (domain.Task, error)
 	EditTask(context.Context, int64, app.EditTaskInput) (domain.Task, error)
 	MarkReady(context.Context, int64) (domain.Task, error)
@@ -29,7 +29,7 @@ const (
 )
 
 type tasksLoadedMsg struct {
-	tasks []domain.Task
+	tasks []domain.TaskView
 	err   error
 }
 
@@ -49,7 +49,7 @@ type Model struct {
 	service    Service
 	route      route
 	previous   route
-	tasks      []domain.Task
+	tasks      []domain.TaskView
 	selected   int
 	selectedID int64
 	loading    bool
