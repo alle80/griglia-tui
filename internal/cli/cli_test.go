@@ -162,6 +162,134 @@ func TestAgentCoordinationCLIAndJSON(t *testing.T) {
 	}
 }
 
+func TestQuestionFlowCLIAndJSON(t *testing.T) {
+	dir := t.TempDir()
+	if code, _, _ := run(t, dir, "init"); code != 0 {
+		t.Fatal(code)
+	}
+	if code, _, _ := run(t, dir, "task", "add", "Parser decision", "--lifecycle", "ready"); code != 0 {
+		t.Fatal(code)
+	}
+	if code, _, _ := run(t, dir, "task", "claim", "1", "--agent", "codex", "--instance", "session-a"); code != 0 {
+		t.Fatal(code)
+	}
+
+	code, out, stderr := run(t, dir, "task", "ask", "1", "Should malformed nodes be preserved?", "--agent", "codex", "--instance", "session-a", "--blocking", "--json")
+	if code != 0 || stderr != "" || !strings.Contains(out, `"blocking":true`) || !strings.Contains(out, `"agent_name":"codex"`) || !strings.Contains(out, `"answer":null`) {
+		t.Fatalf("ask: %d %q %q", code, out, stderr)
+	}
+	code, out, stderr = run(t, dir, "task", "show", "1", "--json")
+	if code != 0 || stderr != "" || !strings.Contains(out, `"operational_state":"waiting_for_human"`) {
+		t.Fatalf("waiting show: %d %q %q", code, out, stderr)
+	}
+
+	// Blocking questions veto release and agent completion.
+	for _, args := range [][]string{
+		{"task", "release", "1", "--agent", "codex", "--instance", "session-a", "--json"},
+		{"task", "done", "1", "--agent", "codex", "--instance", "session-a", "--comment", "done", "--json"},
+	} {
+		code, out, stderr = run(t, dir, args...)
+		if code != 5 || stderr != "" || !strings.Contains(out, `"code":"conflict"`) {
+			t.Fatalf("guard args=%v code=%d out=%q err=%q", args, code, out, stderr)
+		}
+	}
+
+	// A non-blocking question does not affect the working state.
+	if code, _, _ = run(t, dir, "task", "ask", "1", "FYI only", "--agent", "codex", "--instance", "session-a"); code != 0 {
+		t.Fatal(code)
+	}
+	code, out, stderr = run(t, dir, "task", "answer", "1", "Yes, preserve them", "--json")
+	if code != 0 || stderr != "" || !strings.Contains(out, `"answer":"Yes, preserve them"`) || !strings.Contains(out, `"acknowledged_at":null`) {
+		t.Fatalf("answer: %d %q %q", code, out, stderr)
+	}
+	code, out, stderr = run(t, dir, "task", "show", "1", "--json")
+	if code != 0 || stderr != "" || !strings.Contains(out, `"operational_state":"working"`) {
+		t.Fatalf("working show: %d %q %q", code, out, stderr)
+	}
+
+	code, out, stderr = run(t, dir, "task", "questions", "1", "--unanswered", "--json")
+	if code != 0 || stderr != "" || !strings.Contains(out, `"body":"FYI only"`) || strings.Contains(out, "malformed nodes") {
+		t.Fatalf("unanswered: %d %q %q", code, out, stderr)
+	}
+	code, out, stderr = run(t, dir, "task", "questions", "1", "--unacknowledged", "--json")
+	if code != 0 || stderr != "" || !strings.Contains(out, "malformed nodes") || !strings.Contains(out, "FYI only") {
+		t.Fatalf("unacknowledged: %d %q %q", code, out, stderr)
+	}
+
+	code, out, stderr = run(t, dir, "task", "acknowledge", "1", "--agent", "codex", "--instance", "session-a", "--json")
+	if code != 0 || stderr != "" || !strings.Contains(out, `"acknowledged_at":"`) {
+		t.Fatalf("acknowledge: %d %q %q", code, out, stderr)
+	}
+	code, out, stderr = run(t, dir, "task", "questions", "1", "--unacknowledged", "--json")
+	if code != 0 || stderr != "" || strings.Contains(out, "malformed nodes") {
+		t.Fatalf("post-ack filter: %d %q %q", code, out, stderr)
+	}
+	code, out, stderr = run(t, dir, "task", "done", "1", "--agent", "codex", "--instance", "session-a", "--comment", "Implemented", "--json")
+	if code != 0 || stderr != "" || !strings.Contains(out, `"lifecycle":"done"`) {
+		t.Fatalf("done: %d %q %q", code, out, stderr)
+	}
+	// History stays readable after terminal completion.
+	code, out, stderr = run(t, dir, "task", "questions", "1")
+	if code != 0 || stderr != "" || !strings.Contains(out, "blocking") || !strings.Contains(out, "acknowledged") {
+		t.Fatalf("human history: %d %q %q", code, out, stderr)
+	}
+}
+
+func TestQuestionCommandErrors(t *testing.T) {
+	dir := t.TempDir()
+	if code, _, _ := run(t, dir, "init"); code != 0 {
+		t.Fatal(code)
+	}
+	if code, _, _ := run(t, dir, "task", "add", "Guarded", "--lifecycle", "ready"); code != 0 {
+		t.Fatal(code)
+	}
+	if code, _, _ := run(t, dir, "task", "claim", "1", "--agent", "codex", "--instance", "session-a"); code != 0 {
+		t.Fatal(code)
+	}
+	if code, _, _ := run(t, dir, "task", "ask", "1", "Blocking?", "--agent", "codex", "--instance", "session-a", "--blocking"); code != 0 {
+		t.Fatal(code)
+	}
+	for _, tc := range []struct {
+		args []string
+		code int
+		want string
+	}{
+		{[]string{"task", "ask", "1", "hi", "--agent", "claude", "--instance", "other", "--blocking"}, 5, `"code":"conflict"`},
+		{[]string{"task", "ask", "1", "  ", "--agent", "codex", "--instance", "session-a"}, 2, `"code":"invalid_input"`},
+		{[]string{"task", "ask", "99", "hi", "--agent", "codex", "--instance", "session-a"}, 4, `"code":"not_found"`},
+		{[]string{"task", "ask", "1", "hi"}, 2, `"code":"invalid_input"`},
+		{[]string{"task", "answer", "0", "hi"}, 2, "question ID must be a positive integer"},
+		{[]string{"task", "answer", "99", "hi"}, 4, "question not found"},
+		{[]string{"task", "answer", "1", ""}, 2, `"code":"invalid_input"`},
+		{[]string{"task", "acknowledge", "1", "--agent", "codex", "--instance", "session-a"}, 5, `"code":"conflict"`},
+		{[]string{"task", "acknowledge", "99", "--agent", "codex", "--instance", "session-a"}, 4, "question not found"},
+		{[]string{"task", "acknowledge", "1"}, 2, `"code":"invalid_input"`},
+		{[]string{"task", "questions", "99"}, 4, `"code":"not_found"`},
+		{[]string{"task", "questions", "1", "--unanswered", "--unacknowledged"}, 2, "at most one"},
+	} {
+		code, out, stderr := run(t, dir, append(tc.args, "--json")...)
+		if code != tc.code || stderr != "" || !strings.Contains(out, tc.want) {
+			t.Fatalf("args=%v code=%d out=%q err=%q", tc.args, code, out, stderr)
+		}
+	}
+	// After answering, the wrong identity still cannot acknowledge.
+	if code, _, _ := run(t, dir, "task", "answer", "1", "yes"); code != 0 {
+		t.Fatal(code)
+	}
+	code, out, stderr := run(t, dir, "task", "acknowledge", "1", "--agent", "claude", "--instance", "other", "--json")
+	if code != 5 || stderr != "" || !strings.Contains(out, `"code":"conflict"`) {
+		t.Fatalf("foreign ack: %d %q %q", code, out, stderr)
+	}
+	// Empty task question list stays a JSON array.
+	if code, _, _ := run(t, dir, "task", "add", "No questions"); code != 0 {
+		t.Fatal(code)
+	}
+	code, out, stderr = run(t, dir, "task", "questions", "2", "--json")
+	if code != 0 || stderr != "" || !strings.Contains(out, `"questions":[]`) {
+		t.Fatalf("empty list: %d %q %q", code, out, stderr)
+	}
+}
+
 func TestAgentCommandValidationAndRelease(t *testing.T) {
 	dir := t.TempDir()
 	if code, _, _ := run(t, dir, "init"); code != 0 {

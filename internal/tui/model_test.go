@@ -443,6 +443,183 @@ func TestAgentCoordinationRendering(t *testing.T) {
 	}
 }
 
+func runCmd(t *testing.T, model Model, cmd tea.Cmd) Model {
+	t.Helper()
+	if cmd == nil {
+		return model
+	}
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, sub := range batch {
+			model = runCmd(t, model, tea.Cmd(sub))
+		}
+		return model
+	}
+	model, next := update(t, model, msg)
+	return runCmd(t, model, next)
+}
+
+func makeQuestion(id, taskID int64, body string, blocking bool) domain.Question {
+	return domain.Question{ID: id, TaskID: taskID, Body: body, Blocking: blocking, AskedBy: domain.AgentIdentity{AgentName: "codex", InstanceID: "session-123"}, AskedAt: time.Date(2026, 8, 23, 12, 15, 0, 0, time.UTC)}
+}
+
+func TestWaitingForHumanRendering(t *testing.T) {
+	task := makeTask(8, "Parser", domain.PriorityHigh, domain.LifecycleReady)
+	claim := &domain.Claim{TaskID: 8, AgentName: "codex", InstanceID: "session-123", ClaimedAt: time.Date(2026, 8, 23, 12, 30, 0, 0, time.UTC)}
+	view := domain.NewTaskView(task, claim, true)
+	model := New(context.Background(), &fakeService{})
+	model.loading, model.tasks, model.selectedID = false, []domain.TaskView{view}, 8
+	model.width = 120
+	model.restoreSelection()
+	if !strings.Contains(model.render(), "[waiting_for_human]") {
+		t.Fatalf("list missing waiting indicator: %q", model.render())
+	}
+	model.route = routeDetail
+	for _, want := range []string{"Operational state: waiting_for_human", "!! Waiting for human input", "press w"} {
+		if !strings.Contains(model.render(), want) {
+			t.Fatalf("detail missing %q: %q", want, model.render())
+		}
+	}
+	model.route, model.width = routeList, 38
+	if !strings.Contains(model.render(), "waiting_for_human") {
+		t.Fatalf("narrow list=%q", model.render())
+	}
+}
+
+func TestQuestionNavigationAnswerAndSelectionPreserved(t *testing.T) {
+	blocking := makeQuestion(1, 5, "Should malformed nodes be preserved?", true)
+	info := makeQuestion(2, 5, "FYI note", false)
+	service := &fakeService{tasks: []domain.Task{makeTask(5, "Parser", domain.PriorityHigh, domain.LifecycleReady)}, questions: []domain.Question{blocking, info}}
+	model := load(t, New(context.Background(), service))
+	model, _ = update(t, model, key("enter"))
+	model, cmd := update(t, model, key("w"))
+	if model.route != routeQuestions || !model.questionsLoading || cmd == nil {
+		t.Fatalf("route=%v loading=%v", model.route, model.questionsLoading)
+	}
+	model = runCmd(t, model, cmd)
+	view := model.render()
+	for _, want := range []string{"QUESTIONS — TASK #5", "[BLOCKING]", "[info]", "unanswered", "Should malformed nodes be preserved?"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("questions view missing %q: %q", want, view)
+		}
+	}
+	model, _ = update(t, model, key("j"))
+	if model.questionSelectedID != 2 {
+		t.Fatalf("selected question=%d", model.questionSelectedID)
+	}
+	model, _ = update(t, model, key("k"))
+	model, _ = update(t, model, key("enter"))
+	if model.route != routeForm || !model.form.answering || model.form.questionID != 1 {
+		t.Fatalf("answer form=%+v route=%v", model.form, model.route)
+	}
+	model.form.inputs[0].SetValue("Yes, preserve them")
+	model, cmd = update(t, model, key("enter"))
+	if cmd == nil || !model.form.saving {
+		t.Fatal("expected answer command")
+	}
+	model = runCmd(t, model, cmd)
+	if model.route != routeQuestions || model.questionSelectedID != 1 || !strings.Contains(model.status, "Answered question #1") {
+		t.Fatalf("after answer route=%v selected=%d status=%q", model.route, model.questionSelectedID, model.status)
+	}
+	if service.questions[0].Answer == nil || *service.questions[0].Answer != "Yes, preserve them" {
+		t.Fatalf("service question=%+v", service.questions[0])
+	}
+	view = model.render()
+	if !strings.Contains(view, "answered") || !strings.Contains(view, "Answer: Yes, preserve them") {
+		t.Fatalf("refreshed questions view=%q", view)
+	}
+	// Back returns to the detail we came from, then to the list.
+	model, _ = update(t, model, key("q"))
+	if model.route != routeDetail {
+		t.Fatalf("route after back=%v", model.route)
+	}
+}
+
+func TestQuestionsFromListEscAndAcknowledgedAreReadOnly(t *testing.T) {
+	acked := makeQuestion(3, 5, "Old decision", true)
+	answer := "resolved"
+	when := time.Date(2026, 8, 23, 12, 40, 0, 0, time.UTC)
+	acked.Answer, acked.AnsweredAt, acked.AcknowledgedAt = &answer, &when, &when
+	service := &fakeService{tasks: []domain.Task{makeTask(5, "Parser", domain.PriorityHigh, domain.LifecycleReady)}, questions: []domain.Question{acked}}
+	model := load(t, New(context.Background(), service))
+	model, cmd := update(t, model, key("w"))
+	model = runCmd(t, model, cmd)
+	if model.route != routeQuestions || model.questionsFrom != routeList {
+		t.Fatalf("route=%v from=%v", model.route, model.questionsFrom)
+	}
+	if !strings.Contains(model.render(), "acknowledged") {
+		t.Fatalf("view=%q", model.render())
+	}
+	// Acknowledged questions cannot be reopened for answering.
+	model, _ = update(t, model, key("enter"))
+	if model.route != routeQuestions {
+		t.Fatalf("acknowledged question opened form: %v", model.route)
+	}
+	// Refresh reloads both questions and tasks.
+	model, cmd = update(t, model, key("r"))
+	if cmd == nil || !model.questionsLoading {
+		t.Fatal("expected refresh command")
+	}
+	model = runCmd(t, model, cmd)
+	model, _ = update(t, model, key("q"))
+	if model.route != routeList {
+		t.Fatalf("route after back=%v", model.route)
+	}
+}
+
+func TestAnswerFormEscReturnsToQuestions(t *testing.T) {
+	service := &fakeService{tasks: []domain.Task{makeTask(5, "Parser", domain.PriorityHigh, domain.LifecycleReady)}, questions: []domain.Question{makeQuestion(1, 5, "Open question", true)}}
+	model := load(t, New(context.Background(), service))
+	model, cmd := update(t, model, key("w"))
+	model = runCmd(t, model, cmd)
+	model, _ = update(t, model, key("enter"))
+	if model.route != routeForm || !model.form.answering {
+		t.Fatalf("form=%+v", model.form)
+	}
+	// An empty answer is rejected locally and recoverable.
+	model, cmd = update(t, model, key("enter"))
+	if cmd != nil || model.form.err == nil {
+		t.Fatalf("empty answer err=%v", model.form.err)
+	}
+	model, _ = update(t, model, key("esc"))
+	if model.route != routeQuestions {
+		t.Fatalf("route after esc=%v", model.route)
+	}
+}
+
+func TestPrintableShortcutsAreTextInAnswerForm(t *testing.T) {
+	for _, printable := range []string{"e", "a", "d", "x", "Q", "w", "r", "q", "n", "j", "k"} {
+		t.Run(printable, func(t *testing.T) {
+			service := &fakeService{tasks: []domain.Task{makeTask(5, "Parser", domain.PriorityHigh, domain.LifecycleReady)}, questions: []domain.Question{makeQuestion(1, 5, "Open question", true)}}
+			model := load(t, New(context.Background(), service))
+			model, cmd := update(t, model, key("w"))
+			model = runCmd(t, model, cmd)
+			model, _ = update(t, model, key("enter"))
+			model, cmd = update(t, model, key(printable))
+			assertPrintableStayedInForm(t, model, cmd, printable)
+			if service.questions[0].Answer != nil {
+				t.Fatalf("shortcut answered the question: %+v", service.questions[0])
+			}
+		})
+	}
+}
+
+func TestQuestionLoadErrorIsRecoverable(t *testing.T) {
+	service := &fakeService{tasks: []domain.Task{makeTask(5, "Parser", domain.PriorityHigh, domain.LifecycleReady)}, qListErr: errors.New("questions unavailable")}
+	model := load(t, New(context.Background(), service))
+	model, cmd := update(t, model, key("w"))
+	model = runCmd(t, model, cmd)
+	if model.route != routeQuestions || model.actionErr == nil || !strings.Contains(model.render(), "questions unavailable") {
+		t.Fatalf("route=%v err=%v", model.route, model.actionErr)
+	}
+	service.qListErr = nil
+	model, cmd = update(t, model, key("r"))
+	model = runCmd(t, model, cmd)
+	if model.actionErr != nil || !strings.Contains(model.render(), "No questions") {
+		t.Fatalf("recovered view=%q", model.render())
+	}
+}
+
 func TestClaimedTaskLifecycleConflictIsRecoverable(t *testing.T) {
 	task := makeTask(8, "Parser", domain.PriorityHigh, domain.LifecycleReady)
 	claim := &domain.Claim{TaskID: 8, AgentName: "codex", InstanceID: "session-123", ClaimedAt: time.Now().UTC()}

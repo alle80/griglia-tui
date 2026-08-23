@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -88,6 +89,31 @@ func TestEditAndLifecycleSemantics(t *testing.T) {
 	}
 	if _, err = s.CancelTask(context.Background(), 1, "late"); !errors.Is(err, domain.ErrConflict) {
 		t.Fatalf("terminal cancel err=%v", err)
+	}
+}
+
+func TestQuestionInputValidation(t *testing.T) {
+	s := New(&memoryRepository{})
+	ctx := context.Background()
+	identity := domain.AgentIdentity{AgentName: "codex", InstanceID: "one"}
+	long := strings.Repeat("x", domain.MaxQuestionTextLength+1)
+	if _, err := s.AskQuestion(ctx, 1, "valid?", true, domain.AgentIdentity{}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("missing identity err=%v", err)
+	}
+	for _, body := range []string{"", "   ", long} {
+		if _, err := s.AskQuestion(ctx, 1, body, true, identity); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("body=%q err=%v", body, err)
+		}
+		if _, err := s.AnswerQuestion(ctx, 1, body); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("answer=%q err=%v", body, err)
+		}
+	}
+	if _, err := s.AcknowledgeQuestion(ctx, 1, domain.AgentIdentity{AgentName: "codex"}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("partial identity err=%v", err)
+	}
+	q, err := s.AskQuestion(ctx, 7, "Should malformed nodes be preserved?", true, identity)
+	if err != nil || q.TaskID != 7 || !q.Blocking || q.AskedBy != identity {
+		t.Fatalf("ask=%+v err=%v", q, err)
 	}
 }
 
