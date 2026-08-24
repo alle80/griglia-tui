@@ -6,7 +6,12 @@ package cli
 // (docs/WORKSPACES.md §10).
 
 import (
+	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -133,4 +138,118 @@ func TestProtocolWorkspaceDTOs(t *testing.T) {
 	if code != 0 || len(data["workspaces"].([]any)) != 0 {
 		t.Fatalf("workspaces must be an empty array, got %v", data["workspaces"])
 	}
+}
+
+// failingGitShim prepends a git wrapper to PATH that fails with exit 1 on any
+// invocation whose arguments match the shell case pattern and delegates every
+// other invocation to the real binary — the only way to force a specific git
+// step to fail through the full CLI surface.
+func failingGitShim(t *testing.T, pattern string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("PATH shim requires a POSIX shell")
+	}
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git binary not available")
+	}
+	shimDir := t.TempDir()
+	shim := fmt.Sprintf("#!/bin/sh\ncase \"$*\" in\n  %s) echo 'simulated git failure' >&2; exit 1;;\nesac\nexec %q \"$@\"\n", pattern, realGit)
+	if err = os.WriteFile(filepath.Join(shimDir, "git"), []byte(shim), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func createdWorkspaceProject(t *testing.T, title string) string {
+	t.Helper()
+	root, _ := initWorkspaceProject(t)
+	addClaimedReadyTask(t, root, title, "codex", "one")
+	if code, _, _ := runJSON(t, root, "workspace", "create", "1", "--agent", "codex", "--instance", "one"); code != 0 {
+		t.Fatal(code)
+	}
+	return root
+}
+
+// TestProtocolWorkspaceRemoveFailures pins the two distinguishable removal
+// failure shapes (PROTOCOL.md): a failure before the worktree is destroyed is
+// a plain error envelope (data null, workspace still live), while a failure
+// of post-removal cleanup carries the removed workspace as data — the only
+// error envelope with a payload — so callers can see the destructive step
+// already happened and the row is genuinely removed.
+func TestProtocolWorkspaceRemoveFailures(t *testing.T) {
+	agent := []string{"--agent", "codex", "--instance", "one"}
+
+	t.Run("failure before destruction keeps the workspace live", func(t *testing.T) {
+		root := createdWorkspaceProject(t, "predestruction")
+		failingGitShim(t, `"worktree remove"*`)
+		code, data, errObj := runJSON(t, root, append([]string{"workspace", "remove", "1"}, agent...)...)
+		if code != 1 || errObj["code"] != "git_error" {
+			t.Fatalf("code=%d err=%v", code, errObj)
+		}
+		if data != nil {
+			t.Fatalf("pre-destruction failure must not carry a payload: %v", data)
+		}
+		code, data, _ = runJSON(t, root, "workspace", "show", "1")
+		if code != 0 || data["workspace"].(map[string]any)["state"] != "ready" {
+			t.Fatalf("workspace must remain live: %d %v", code, data)
+		}
+	})
+
+	t.Run("prune failure after removal carries the removed workspace", func(t *testing.T) {
+		root := createdWorkspaceProject(t, "prune fails")
+		failingGitShim(t, `"worktree prune"*`)
+		code, data, errObj := runJSON(t, root, append([]string{"workspace", "remove", "1"}, agent...)...)
+		if code != 1 || errObj["code"] != "git_error" {
+			t.Fatalf("code=%d err=%v", code, errObj)
+		}
+		if !strings.HasPrefix(errObj["message"].(string), "workspace removed, but post-removal cleanup failed") {
+			t.Fatalf("message=%v", errObj["message"])
+		}
+		assertExactKeys(t, "partial-success data", data, "workspace")
+		workspace := data["workspace"].(map[string]any)
+		assertWorkspaceDTO(t, workspace)
+		if workspace["state"] != "removed" {
+			t.Fatalf("workspace=%v", workspace)
+		}
+		// The row is genuinely removed: the read model no longer serves it.
+		code, _, errObj = runJSON(t, root, "workspace", "show", "1")
+		if code != 4 || errObj["code"] != "not_found" {
+			t.Fatalf("show after removal: %d %v", code, errObj)
+		}
+	})
+
+	t.Run("branch deletion failure after removal carries the removed workspace", func(t *testing.T) {
+		root := createdWorkspaceProject(t, "branch delete fails")
+		failingGitShim(t, `"branch -D"*`)
+		code, data, errObj := runJSON(t, root, append([]string{"workspace", "remove", "1", "--delete-branch"}, agent...)...)
+		if code != 1 || errObj["code"] != "git_error" {
+			t.Fatalf("code=%d err=%v", code, errObj)
+		}
+		if !strings.HasPrefix(errObj["message"].(string), "workspace removed, but post-removal cleanup failed") {
+			t.Fatalf("message=%v", errObj["message"])
+		}
+		workspace := data["workspace"].(map[string]any)
+		assertWorkspaceDTO(t, workspace)
+		if workspace["state"] != "removed" {
+			t.Fatalf("workspace=%v", workspace)
+		}
+		// The failed deletion left the branch behind — resource reality the
+		// caller can still act on.
+		if out := wsGit(t, root, "branch", "--list", "griglia/task-1-branch-delete-fails"); out == "" {
+			t.Fatal("branch should still exist after the failed deletion")
+		}
+	})
+
+	t.Run("human output states the removal happened", func(t *testing.T) {
+		root := createdWorkspaceProject(t, "human cleanup")
+		failingGitShim(t, `"worktree prune"*`)
+		code, out, stderr := run(t, root, append([]string{"workspace", "remove", "1"}, agent...)...)
+		if code != 1 || out != "" {
+			t.Fatalf("code=%d stdout=%q", code, out)
+		}
+		if !strings.Contains(stderr, "workspace removed, but post-removal cleanup failed") {
+			t.Fatalf("stderr=%q", stderr)
+		}
+	})
 }

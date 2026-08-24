@@ -106,7 +106,12 @@ export GRIGLIA_PROJECT="$project_root"   # pin the board before any further comm
   unless `--delete-branch`; uncommitted changes are refused without
   `--force`.
 - Git failures use exit 1 with the stable `error.code` `"git_error"`; the
-  message carries the git stderr.
+  message carries the git stderr. On `workspace remove`, check the error
+  envelope's `data`: non-null `data.workspace` with `state` `"removed"`
+  means the worktree was destroyed and the row removed — only post-removal
+  cleanup failed — while `data: null` means the removal itself failed and
+  the workspace is still live (PROTOCOL.md, "workspace remove failure
+  shapes").
 
 ### Sandbox profile for launchers
 

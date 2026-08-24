@@ -15,7 +15,7 @@ carries protocol data. This contract is pinned by
 |---|---|---|
 | `protocol_version` | string | always `"1"` for this protocol |
 | `ok` | boolean | `true` on success |
-| `data` | object or null | command payload; `null` on error |
+| `data` | object or null | command payload; `null` on error, with one documented partial-success exception (`workspace remove`, below) |
 | `error` | object or null | `{"code","message"}`; `null` on success |
 
 Errors use the same envelope:
@@ -179,10 +179,28 @@ Commands intended for agents (identity required): `claim`, `claim-next`,
 Commands intended for humans: everything else; `answer` is explicitly the
 human side of the question flow. `workspace show`/`list` are open reads;
 `workspace remove` needs no identity while the workspace is idle, and the
-owning identity or `--force` while the task is claimed. When removal
-succeeds but post-removal cleanup fails, the command reports `git_error`
-with a message beginning `workspace removed, but post-removal cleanup
-failed` — the row is genuinely `removed`.
+owning identity or `--force` while the task is claimed.
+
+### `workspace remove` failure shapes
+
+Removal persists the `removed` state as soon as the worktree is destroyed
+(or confirmed absent); `git worktree prune` and optional branch deletion are
+post-removal cleanup. The two failure cases are machine-distinguishable:
+
+- **Failure before destruction** (refused dirty worktree, ownership
+  conflict, `git worktree remove` failure, …): a normal error envelope with
+  its usual code and `data: null`. The workspace row stays live and the
+  worktree is untouched.
+- **Removal succeeded, cleanup failed**: exit 1 with `error.code`
+  `"git_error"`, a message beginning
+  `workspace removed, but post-removal cleanup failed`, and — uniquely among
+  error envelopes — `data:{"workspace": Workspace}` whose `state` is
+  `"removed"`. The row is genuinely removed; the payload is the persisted
+  result of the destructive step that already happened. This is the only
+  case in protocol v1 where an error envelope carries non-null `data`.
+
+Human output makes the same distinction: the cleanup-failure message on
+stderr states explicitly that the workspace was removed.
 
 ## Compatibility policy
 

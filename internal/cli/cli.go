@@ -42,6 +42,19 @@ type commandError struct {
 
 func (e *commandError) Error() string { return e.message }
 
+// errorWithData is a commandError that additionally carries a data payload
+// for the JSON envelope. It exists for the one partial-success case in the
+// protocol: a destructive step already succeeded and its persisted result
+// must reach the caller alongside the error (workspace remove whose
+// post-removal cleanup failed). Everywhere else, error envelopes keep
+// data null.
+type errorWithData struct {
+	*commandError
+	data any
+}
+
+func (e *errorWithData) Unwrap() error { return e.commandError }
+
 func Run(args []string, stdout, stderr io.Writer, opts Options) int {
 	s := &state{out: stdout, errOut: stderr, opts: opts}
 	root := s.root()
@@ -71,7 +84,12 @@ func Run(args []string, stdout, stderr io.Writer, opts Options) int {
 			// failure visible on stderr, which is reserved for diagnostics.
 			fmt.Fprintln(s.errOut, "Error:", err)
 		}
-		s.writeError(ce)
+		var de *errorWithData
+		if s.json && errors.As(err, &de) {
+			_ = writeJSON(s.out, de.data, &errorDTO{Code: ce.kind, Message: ce.message})
+		} else {
+			s.writeError(ce)
+		}
 		return ce.code
 	}
 	return 0

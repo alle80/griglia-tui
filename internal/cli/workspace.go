@@ -164,6 +164,15 @@ func (s *state) workspaceRemoveCommand() *cobra.Command {
 		}
 		info, err := service.RemoveWorkspace(cmd.Context(), id, opts)
 		if err != nil {
+			// The service persists removed before post-removal cleanup: when
+			// the returned row is already removed, the worktree is gone and
+			// only cleanup (prune, optional branch deletion) failed. Carry
+			// the removed workspace next to the git_error so callers can
+			// never mistake a completed destructive removal for a failure
+			// that left the workspace live (PROTOCOL.md, Workspace DTO).
+			if info.Workspace.State == domain.WorkspaceRemoved {
+				return &errorWithData{&commandError{1, "git_error", err.Error()}, map[string]any{"workspace": toWorkspaceDTO(info)}}
+			}
 			return err
 		}
 		if s.json {
