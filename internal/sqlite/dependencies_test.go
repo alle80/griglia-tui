@@ -58,7 +58,7 @@ func TestMigration005FromExistingV4Database(t *testing.T) {
 	}
 	defer s.Close()
 	var version int
-	if err = s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 5 {
+	if err = s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != latestSchemaVersion {
 		t.Fatalf("version=%d err=%v", version, err)
 	}
 	questions, err := s.ListQuestions(context.Background(), 1, domain.QuestionsAll)

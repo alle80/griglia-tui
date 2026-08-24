@@ -25,9 +25,10 @@ var shippedMigrations = []string{
 	"003_claims.sql",
 	"004_questions.sql",
 	"005_dependencies.sql",
+	"006_workspaces.sql",
 }
 
-const latestSchemaVersion = 5
+const latestSchemaVersion = 6
 
 // buildHistoricalDatabase creates a database exactly as a binary shipped at
 // schema version upTo would have left it, including recorded checksums.
@@ -88,6 +89,9 @@ func seedHistoricalData(t *testing.T, db *sql.DB, version int) {
 	if version >= 5 {
 		mustExec(`INSERT INTO dependencies(task_id,depends_on_task_id,created_at) VALUES(1,3,?)`, now)
 	}
+	if version >= 6 {
+		mustExec(`INSERT INTO workspaces(task_id,state,path,branch,base_commit,created_by_agent,created_by_instance,created_at,updated_at) VALUES(2,'ready','/tmp/wt/task-2','griglia/task-2-ready','abc123','claude','session-2',?,?)`, now, now)
+	}
 }
 
 func TestMigrationMatrixPreservesRealisticData(t *testing.T) {
@@ -146,8 +150,10 @@ func verifyMigratedData(t *testing.T, s *Store, from int) {
 	}
 
 	if from >= 2 {
+		// Scoped to the seeded kinds: post-migration write checks below add
+		// their own events to this task on every verification pass.
 		var events int
-		if err = s.db.QueryRow(`SELECT COUNT(*) FROM events WHERE task_id=2`).Scan(&events); err != nil || events != 2 {
+		if err = s.db.QueryRow(`SELECT COUNT(*) FROM events WHERE task_id=2 AND kind IN ('task_created','task_ready')`).Scan(&events); err != nil || events != 2 {
 			t.Fatalf("events=%d err=%v", events, err)
 		}
 	}
@@ -176,22 +182,58 @@ func verifyMigratedData(t *testing.T, s *Store, from int) {
 		}
 	}
 
-	// Dependencies always exist after migration; edges only pre-exist at v5.
+	// Dependencies always exist after migration; edges pre-exist from v5 on.
 	dependencies, err := s.ListDependencies(ctx, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(dependencies) != 0 {
-		t.Fatalf("unexpected migrated edges=%v", dependencies)
+	wantEdges := 0
+	if from >= 5 {
+		wantEdges = 1
+	}
+	if len(dependencies) != wantEdges {
+		t.Fatalf("migrated edges=%v want=%d", dependencies, wantEdges)
 	}
 
 	// The migrated schema must accept new writes in every subsystem.
 	now := time.Now().UTC()
-	if _, err = s.AddDependency(ctx, 1, 3, now); err != nil {
+	if _, err = s.AddDependency(ctx, 4, 3, now); err != nil {
 		t.Fatalf("post-migration dependency write: %v", err)
 	}
-	if err = s.RemoveDependency(ctx, 1, 3, now); err != nil {
+	if err = s.RemoveDependency(ctx, 4, 3, now); err != nil {
 		t.Fatalf("post-migration dependency delete: %v", err)
+	}
+
+	verifyWorkspaceWritesAfterMigration(t, s, from)
+}
+
+// verifyWorkspaceWritesAfterMigration proves the migrated schema accepts the
+// full workspace allocation cycle. It ends with the workspace removed so the
+// post-reopen verification pass can allocate again.
+func verifyWorkspaceWritesAfterMigration(t *testing.T, s *Store, from int) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	identity := domain.AgentIdentity{AgentName: "claude", InstanceID: "session-2"}
+	if from < 3 {
+		// No seeded claim exists before v3; reserving requires the owner.
+		if _, err := s.ClaimTask(ctx, 2, identity, now); err != nil {
+			t.Fatalf("post-migration claim: %v", err)
+		}
+	}
+	w, err := s.ReserveWorkspace(ctx, 2, "/tmp/wt/migrated-task-2", "griglia/task-2-migrated", "abc123", identity, now)
+	if err != nil {
+		t.Fatalf("post-migration workspace reserve: %v", err)
+	}
+	if _, err = s.MarkWorkspaceReady(ctx, w.ID, now); err != nil {
+		t.Fatalf("post-migration workspace ready: %v", err)
+	}
+	live, err := s.LiveWorkspaceForTask(ctx, 2)
+	if err != nil || live == nil || live.State != domain.WorkspaceReady {
+		t.Fatalf("post-migration live workspace=%+v err=%v", live, err)
+	}
+	if _, err = s.RemoveWorkspace(ctx, w.ID, now); err != nil {
+		t.Fatalf("post-migration workspace remove: %v", err)
 	}
 }
 
@@ -226,6 +268,47 @@ func verifyMigrationLedger(t *testing.T, s *Store) {
 	}
 	if next != latestSchemaVersion+1 {
 		t.Fatalf("recorded migrations=%d want=%d", next-1, latestSchemaVersion)
+	}
+}
+
+// A fresh database must apply every shipped migration in order, record the
+// full checksummed ledger, and accept writes in every subsystem, including
+// the workspace cycle introduced by migration 006.
+func TestFreshDatabaseMigratesToLatest(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fresh.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifyMigrationLedger(t, s)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	task := createReadyTask(t, s, "fresh-task", domain.PriorityNormal)
+	identity := domain.AgentIdentity{AgentName: "claude", InstanceID: "fresh-1"}
+	if _, err = s.ClaimTask(ctx, task.ID, identity, now); err != nil {
+		t.Fatal(err)
+	}
+	w, err := s.ReserveWorkspace(ctx, task.ID, "/tmp/wt/fresh", "griglia/fresh", "abc123", identity, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.MarkWorkspaceReady(ctx, w.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopening is a no-op migration that preserves the workspace.
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	verifyMigrationLedger(t, s)
+	live, err := s.LiveWorkspaceForTask(ctx, task.ID)
+	if err != nil || live == nil || live.State != domain.WorkspaceReady || live.Branch != "griglia/fresh" {
+		t.Fatalf("live=%+v err=%v", live, err)
 	}
 }
 
