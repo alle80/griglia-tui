@@ -35,7 +35,7 @@ func TestMigrationAndReopen(t *testing.T) {
 	if err = s.db.QueryRow("SELECT MAX(version) FROM schema_migrations").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 5 {
+	if version != latestSchemaVersion {
 		t.Fatalf("version=%d", version)
 	}
 	if err = s.Close(); err != nil {
@@ -91,7 +91,7 @@ func TestMigrationsFromExistingV1Database(t *testing.T) {
 	}
 	defer s.Close()
 	var version int
-	if err = s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 5 {
+	if err = s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != latestSchemaVersion {
 		t.Fatalf("version=%d err=%v", version, err)
 	}
 	if _, err = s.db.Exec(`INSERT INTO events(kind,actor_kind,payload_json,created_at) VALUES('probe','human','{}',?)`, formatTime(time.Now().UTC())); err != nil {
@@ -137,7 +137,7 @@ func TestMigration003FromExistingV2Database(t *testing.T) {
 	}
 	defer s.Close()
 	var version int
-	if err = s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 5 {
+	if err = s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != latestSchemaVersion {
 		t.Fatalf("version=%d err=%v", version, err)
 	}
 	var table string
@@ -188,7 +188,7 @@ func TestMigration004FromExistingV3Database(t *testing.T) {
 	}
 	defer s.Close()
 	var version int
-	if err = s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 5 {
+	if err = s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != latestSchemaVersion {
 		t.Fatalf("version=%d err=%v", version, err)
 	}
 	view, err := s.GetTask(context.Background(), 1)
