@@ -44,16 +44,25 @@ type WorkspaceStore interface {
 	RemoveWorkspace(ctx context.Context, workspaceID int64, now time.Time) (domain.Workspace, error)
 	LiveWorkspaceForTask(ctx context.Context, taskID int64) (*domain.Workspace, error)
 	WorkspacesForTask(ctx context.Context, taskID int64) ([]domain.Workspace, error)
+	WorkspaceViewForTask(ctx context.Context, taskID int64) (domain.WorkspaceView, error)
+	ListWorkspaceViews(ctx context.Context) ([]domain.WorkspaceView, error)
 }
 
 // WorkspaceInfo bundles a workspace with the path facts an external launcher
 // needs to derive sandbox permissions and pin GRIGLIA_PROJECT
-// (docs/WORKSPACES.md §9). Every path is absolute.
+// (docs/WORKSPACES.md §9). Every path is absolute. ActiveClaim is the task's
+// current claim, read alongside the workspace: it identifies the workspace's
+// user by derivation and is nil when the workspace is parked.
 type WorkspaceInfo struct {
 	Workspace    domain.Workspace
+	ActiveClaim  *domain.Claim
 	ProjectRoot  string
 	Database     string
 	GitCommonDir string
+}
+
+func (i WorkspaceInfo) Usage() domain.WorkspaceUsage {
+	return domain.WorkspaceView{Workspace: i.Workspace, ActiveClaim: i.ActiveClaim}.Usage()
 }
 
 type WorkspaceService struct {
@@ -108,7 +117,7 @@ func (s *WorkspaceService) CreateWorkspace(ctx context.Context, taskID int64, id
 	}
 	if live != nil {
 		if live.State == domain.WorkspaceReady {
-			return s.info(*live, commonDir), nil
+			return s.info(*live, view.ActiveClaim, commonDir), nil
 		}
 		return WorkspaceInfo{}, fmt.Errorf("a workspace allocation is already in flight for this task: %w", domain.ErrConflict)
 	}
@@ -148,7 +157,41 @@ func (s *WorkspaceService) CreateWorkspace(ctx context.Context, taskID int64, id
 	if err != nil {
 		return WorkspaceInfo{}, err
 	}
-	return s.info(ready, commonDir), nil
+	return s.info(ready, view.ActiveClaim, commonDir), nil
+}
+
+// ShowWorkspace returns the task's current workspace — the live one, or the
+// latest failed one when the last allocation attempt failed — with derived
+// usage and launcher facts. Reads are open to humans and agents alike.
+func (s *WorkspaceService) ShowWorkspace(ctx context.Context, taskID int64) (WorkspaceInfo, error) {
+	commonDir, err := s.git.CommonDir(ctx, s.projectRoot)
+	if err != nil {
+		return WorkspaceInfo{}, fmt.Errorf("project root is not usable as a Git repository: %w", err)
+	}
+	view, err := s.store.WorkspaceViewForTask(ctx, taskID)
+	if err != nil {
+		return WorkspaceInfo{}, err
+	}
+	return s.info(view.Workspace, view.ActiveClaim, commonDir), nil
+}
+
+// ListWorkspaces returns the current workspace of every task that has one,
+// ordered by task id, with usage derived from the claims read in the same
+// query.
+func (s *WorkspaceService) ListWorkspaces(ctx context.Context) ([]WorkspaceInfo, error) {
+	commonDir, err := s.git.CommonDir(ctx, s.projectRoot)
+	if err != nil {
+		return nil, fmt.Errorf("project root is not usable as a Git repository: %w", err)
+	}
+	views, err := s.store.ListWorkspaceViews(ctx)
+	if err != nil {
+		return nil, err
+	}
+	infos := make([]WorkspaceInfo, 0, len(views))
+	for _, view := range views {
+		infos = append(infos, s.info(view.Workspace, view.ActiveClaim, commonDir))
+	}
+	return infos, nil
 }
 
 // prepareWorkspacePath clears leftovers of this task's own earlier attempts
@@ -235,53 +278,57 @@ type RemoveWorkspaceOptions struct {
 // together with the error; a live row is never left behind for a resource
 // that no longer exists. Conversely, when the worktree removal itself fails,
 // nothing is persisted and the row stays live.
-func (s *WorkspaceService) RemoveWorkspace(ctx context.Context, taskID int64, opts RemoveWorkspaceOptions) (domain.Workspace, error) {
+func (s *WorkspaceService) RemoveWorkspace(ctx context.Context, taskID int64, opts RemoveWorkspaceOptions) (WorkspaceInfo, error) {
 	if opts.Identity != nil {
 		if err := validateIdentity(*opts.Identity); err != nil {
-			return domain.Workspace{}, err
+			return WorkspaceInfo{}, err
 		}
+	}
+	commonDir, err := s.git.CommonDir(ctx, s.projectRoot)
+	if err != nil {
+		return WorkspaceInfo{}, fmt.Errorf("project root is not usable as a Git repository: %w", err)
 	}
 	view, err := s.store.GetTask(ctx, taskID)
 	if err != nil {
-		return domain.Workspace{}, err
+		return WorkspaceInfo{}, err
 	}
 	w, err := s.removalTarget(ctx, taskID)
 	if err != nil {
-		return domain.Workspace{}, err
+		return WorkspaceInfo{}, err
 	}
 	if view.ActiveClaim != nil && !opts.Force && (opts.Identity == nil || !claimOwnedBy(view.ActiveClaim, *opts.Identity)) {
-		return domain.Workspace{}, fmt.Errorf("workspace is in use by the task's active claim; removal requires the owning identity or force: %w", domain.ErrConflict)
+		return WorkspaceInfo{}, fmt.Errorf("workspace is in use by the task's active claim; removal requires the owning identity or force: %w", domain.ErrConflict)
 	}
 	registered, err := s.git.WorktreeRegistered(ctx, s.projectRoot, w.Path)
 	if err != nil {
-		return domain.Workspace{}, err
+		return WorkspaceInfo{}, err
 	}
 	exists, err := pathExists(w.Path)
 	if err != nil {
-		return domain.Workspace{}, err
+		return WorkspaceInfo{}, err
 	}
 	switch {
 	case registered && exists:
 		if !opts.Force {
 			dirty, dirtyErr := s.git.WorktreeDirty(ctx, w.Path)
 			if dirtyErr != nil {
-				return domain.Workspace{}, dirtyErr
+				return WorkspaceInfo{}, dirtyErr
 			}
 			if dirty {
-				return domain.Workspace{}, fmt.Errorf("worktree has uncommitted changes; removal without force would destroy them: %w", domain.ErrConflict)
+				return WorkspaceInfo{}, fmt.Errorf("worktree has uncommitted changes; removal without force would destroy them: %w", domain.ErrConflict)
 			}
 		}
 		if err = s.git.RemoveWorktree(ctx, s.projectRoot, w.Path, opts.Force); err != nil {
-			return domain.Workspace{}, err
+			return WorkspaceInfo{}, err
 		}
 	case exists:
 		// The directory is no longer a registered worktree, so Git cannot
 		// vouch for its contents; only an explicit force may delete it.
 		if !opts.Force {
-			return domain.Workspace{}, fmt.Errorf("workspace directory exists but is not a registered worktree; repair with 'git worktree repair' or pass force: %w", domain.ErrConflict)
+			return WorkspaceInfo{}, fmt.Errorf("workspace directory exists but is not a registered worktree; repair with 'git worktree repair' or pass force: %w", domain.ErrConflict)
 		}
 		if err = os.RemoveAll(w.Path); err != nil {
-			return domain.Workspace{}, err
+			return WorkspaceInfo{}, err
 		}
 	}
 	// The worktree is gone (or was already absent): persist removed before
@@ -289,7 +336,7 @@ func (s *WorkspaceService) RemoveWorkspace(ctx context.Context, taskID int64, op
 	// resource that no longer exists.
 	removed, err := s.store.RemoveWorkspace(ctx, w.ID, s.now().UTC())
 	if err != nil {
-		return domain.Workspace{}, err
+		return WorkspaceInfo{}, err
 	}
 	var cleanup []error
 	if pruneErr := s.git.PruneWorktrees(ctx, s.projectRoot); pruneErr != nil {
@@ -305,9 +352,9 @@ func (s *WorkspaceService) RemoveWorkspace(ctx context.Context, taskID int64, op
 		}
 	}
 	if len(cleanup) > 0 {
-		return removed, fmt.Errorf("workspace removed, but post-removal cleanup failed: %w", errors.Join(cleanup...))
+		return s.info(removed, view.ActiveClaim, commonDir), fmt.Errorf("workspace removed, but post-removal cleanup failed: %w", errors.Join(cleanup...))
 	}
-	return removed, nil
+	return s.info(removed, view.ActiveClaim, commonDir), nil
 }
 
 // removalTarget resolves which row a by-task removal addresses: the live
@@ -333,8 +380,8 @@ func (s *WorkspaceService) removalTarget(ctx context.Context, taskID int64) (dom
 	return domain.Workspace{}, fmt.Errorf("task has no workspace to remove: %w", domain.ErrNotFound)
 }
 
-func (s *WorkspaceService) info(w domain.Workspace, commonDir string) WorkspaceInfo {
-	return WorkspaceInfo{Workspace: w, ProjectRoot: s.projectRoot, Database: s.database, GitCommonDir: commonDir}
+func (s *WorkspaceService) info(w domain.Workspace, claim *domain.Claim, commonDir string) WorkspaceInfo {
+	return WorkspaceInfo{Workspace: w, ActiveClaim: claim, ProjectRoot: s.projectRoot, Database: s.database, GitCommonDir: commonDir}
 }
 
 func claimOwnedBy(claim *domain.Claim, identity domain.AgentIdentity) bool {

@@ -104,6 +104,34 @@ claim itself is the only source of ownership.
   claimed task. Re-claiming a task you already own is idempotent.
 - Claims never expire on their own; release or completion is always explicit.
 
+## Isolated workspaces
+
+In Git-backed projects, the owner of a claimed task can allocate an isolated
+`git worktree` plus a managed branch instead of working in the main checkout:
+
+```bash
+griglia workspace create 7 --agent claude --instance session-1 --json
+```
+
+The worktree lands outside the repository at
+`<project-parent>/.griglia-worktrees/<project-name>/task-7/` on branch
+`griglia/task-7-<slug>`, based on the main checkout's `HEAD` (override with
+`--base REF`). Because the worktree lives outside the main checkout, run
+further commands from it with the board pinned explicitly:
+`GRIGLIA_PROJECT=/abs/project/root` or `--project` (the flag wins over the
+environment variable).
+
+The workspace row records the resource only; whoever holds the task's active
+claim is, by derivation, its current user (`usage` `in_use`/`idle` in the
+read models). Workspaces survive release, completion, and cancellation —
+work-in-progress and the branch stay put for review, and a later claim
+resumes in place. `workspace show ID` / `workspace list` report state, usage,
+and the absolute launcher facts; `workspace remove ID` prunes the worktree
+(branch kept unless `--delete-branch`, uncommitted changes and in-use
+removal guarded unless `--force` or the owning identity). Everything is
+purely local: no fetch, pull, or push, ever. See
+[docs/WORKSPACES.md](docs/WORKSPACES.md) for the design.
+
 ## Human-in-the-loop questions
 
 An owning agent asks with `task ask ID "text"` (add `--blocking` to pause the
@@ -136,6 +164,9 @@ griglia task progress|release    report or hand back work (agent)
 griglia task ask|acknowledge     question flow (agent)
 griglia task answer|questions    question flow (human)
 griglia task depend|undepend|dependencies
+griglia workspace create ID      allocate the task's worktree (claim owner)
+griglia workspace show ID | list inspect workspaces and derived usage
+griglia workspace remove ID      prune a worktree (--delete-branch, --force)
 ```
 
 Every command accepts `--json`. Example:

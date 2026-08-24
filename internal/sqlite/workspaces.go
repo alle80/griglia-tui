@@ -215,6 +215,91 @@ func (s *Store) ListWorkspaces(ctx context.Context) ([]domain.Workspace, error) 
 	return workspaces, rows.Err()
 }
 
+// The workspace read model serves `workspace show`/`workspace list`: each
+// task's current workspace joined with the task's active claim in one query,
+// so derived usage never needs a per-row claim lookup. The current workspace
+// is the task's most recent row unless that row is removed — the live
+// (allocating or ready) row when one exists, else the latest failed row, whose
+// recorded error is what makes a failed allocation diagnosable. Removed rows
+// are history and never surface here. A live row is always the task's most
+// recent row: reservations only insert when no live row exists, and states
+// otherwise change in place.
+const workspaceViewQuery = `SELECT w.id,w.task_id,w.state,w.path,w.branch,w.base_commit,w.created_by_agent,w.created_by_instance,w.created_at,w.updated_at,w.removed_at,w.error,
+claims.id,claims.task_id,claims.agent_name,claims.instance_id,claims.claimed_at,claims.released_at
+FROM workspaces w
+LEFT JOIN claims ON claims.task_id=w.task_id AND claims.released_at IS NULL
+WHERE w.id=(SELECT MAX(a.id) FROM workspaces a WHERE a.task_id=w.task_id) AND w.state<>'removed'`
+
+// WorkspaceViewForTask returns the task's current workspace with its derived
+// claim, or ErrNotFound when the task does not exist or has no current
+// workspace.
+func (s *Store) WorkspaceViewForTask(ctx context.Context, taskID int64) (domain.WorkspaceView, error) {
+	var exists int
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM tasks WHERE id=?`, taskID).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+		return domain.WorkspaceView{}, domain.ErrNotFound
+	} else if err != nil {
+		return domain.WorkspaceView{}, err
+	}
+	view, err := scanWorkspaceView(s.db.QueryRowContext(ctx, workspaceViewQuery+` AND w.task_id=?`, taskID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.WorkspaceView{}, fmt.Errorf("task has no workspace: %w", domain.ErrNotFound)
+	}
+	return view, err
+}
+
+// ListWorkspaceViews returns the current workspace of every task that has
+// one, with derived claims, ordered by task id.
+func (s *Store) ListWorkspaceViews(ctx context.Context) ([]domain.WorkspaceView, error) {
+	rows, err := s.db.QueryContext(ctx, workspaceViewQuery+` ORDER BY w.task_id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	views := make([]domain.WorkspaceView, 0)
+	for rows.Next() {
+		view, scanErr := scanWorkspaceView(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		views = append(views, view)
+	}
+	return views, rows.Err()
+}
+
+func scanWorkspaceView(row scanner) (domain.WorkspaceView, error) {
+	var view domain.WorkspaceView
+	var created, updated string
+	var removed sql.NullString
+	var claimID, claimTaskID sql.NullInt64
+	var claimAgent, claimInstance, claimedAt, releasedAt sql.NullString
+	if err := row.Scan(&view.ID, &view.TaskID, &view.State, &view.Path, &view.Branch, &view.BaseCommit, &view.CreatedBy.AgentName, &view.CreatedBy.InstanceID, &created, &updated, &removed, &view.Error,
+		&claimID, &claimTaskID, &claimAgent, &claimInstance, &claimedAt, &releasedAt); err != nil {
+		return view, err
+	}
+	var err error
+	if view.CreatedAt, err = parseTime(created); err != nil {
+		return view, err
+	}
+	if view.UpdatedAt, err = parseTime(updated); err != nil {
+		return view, err
+	}
+	if removed.Valid {
+		v, parseErr := parseTime(removed.String)
+		if parseErr != nil {
+			return view, parseErr
+		}
+		view.RemovedAt = &v
+	}
+	if claimID.Valid {
+		claim := &domain.Claim{ID: claimID.Int64, TaskID: claimTaskID.Int64, AgentName: claimAgent.String, InstanceID: claimInstance.String}
+		if claim.ClaimedAt, err = parseTime(claimedAt.String); err != nil {
+			return view, err
+		}
+		view.ActiveClaim = claim
+	}
+	return view, nil
+}
+
 func workspaceFromTx(ctx context.Context, tx *sql.Tx, id int64) (domain.Workspace, error) {
 	w, err := scanWorkspace(tx.QueryRowContext(ctx, `SELECT `+workspaceColumns+` FROM workspaces WHERE id=?`, id))
 	if errors.Is(err, sql.ErrNoRows) {

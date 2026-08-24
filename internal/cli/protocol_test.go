@@ -52,15 +52,22 @@ func decodeEnvelope(t *testing.T, stdout string) (bool, map[string]any, map[stri
 		}
 		return true, data, nil
 	}
-	if envelope["data"] != nil {
-		t.Fatalf("error envelope has data: %v", envelope["data"])
-	}
 	errObj, isMap := envelope["error"].(map[string]any)
 	if !isMap {
 		t.Fatalf("error is not an object: %v", envelope["error"])
 	}
 	assertExactKeys(t, "error", errObj, "code", "message")
-	return false, nil, errObj
+	// Error envelopes carry data null, except the documented partial-success
+	// case (`workspace remove` whose cleanup failed); callers that expect the
+	// general rule assert data == nil themselves.
+	if envelope["data"] == nil {
+		return false, nil, errObj
+	}
+	data, isMap := envelope["data"].(map[string]any)
+	if !isMap {
+		t.Fatalf("error envelope data is not an object: %v", envelope["data"])
+	}
+	return false, data, errObj
 }
 
 func assertExactKeys(t *testing.T, label string, m map[string]any, want ...string) {
@@ -479,9 +486,12 @@ func TestProtocolStableErrors(t *testing.T) {
 		{"claimed human edit", dir, []string{"task", "edit", "1", "--title", "New"}, 5, "conflict"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			code, _, errObj := runJSON(t, tc.dir, tc.args...)
+			code, data, errObj := runJSON(t, tc.dir, tc.args...)
 			if code != tc.code || errObj["code"] != tc.kind {
 				t.Fatalf("code=%d err=%v want %d/%s", code, errObj, tc.code, tc.kind)
+			}
+			if data != nil {
+				t.Fatalf("error envelopes carry data null outside the workspace remove partial-success case: %v", data)
 			}
 			if message, _ := errObj["message"].(string); strings.TrimSpace(message) == "" {
 				t.Fatalf("error message must be present: %v", errObj)

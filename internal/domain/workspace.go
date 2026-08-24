@@ -94,6 +94,31 @@ func WorkspaceBranchName(taskID int64, title string) string {
 	return fmt.Sprintf("griglia/task-%d-%s", taskID, slug)
 }
 
+// WorkspaceUsage is the derived claim axis of a workspace: whether the task
+// currently has an active claim. It is computed at read time from the claims
+// table and never persisted (docs/WORKSPACES.md §7.1).
+type WorkspaceUsage string
+
+const (
+	WorkspaceInUse WorkspaceUsage = "in_use"
+	WorkspaceIdle  WorkspaceUsage = "idle"
+)
+
+// WorkspaceView pairs a workspace row with the task's active claim, read in
+// the same query. The claim identifies the workspace's current user by
+// derivation; a nil claim means the workspace is parked.
+type WorkspaceView struct {
+	Workspace
+	ActiveClaim *Claim
+}
+
+func (v WorkspaceView) Usage() WorkspaceUsage {
+	if v.ActiveClaim != nil {
+		return WorkspaceInUse
+	}
+	return WorkspaceIdle
+}
+
 func ValidateWorkspacePath(path string) error {
 	if strings.TrimSpace(path) == "" {
 		return ErrInvalid

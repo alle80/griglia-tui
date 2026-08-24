@@ -416,8 +416,8 @@ func TestRemoveWorkspaceKeepsBranchByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if removed.State != domain.WorkspaceRemoved {
-		t.Fatalf("state=%s", removed.State)
+	if removed.Workspace.State != domain.WorkspaceRemoved {
+		t.Fatalf("state=%s", removed.Workspace.State)
 	}
 	if _, err = os.Stat(info.Workspace.Path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("worktree directory still exists: %v", err)
@@ -532,8 +532,8 @@ func TestRemoveWorkspaceMissingDirectoryRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if removed.State != domain.WorkspaceRemoved {
-		t.Fatalf("state=%s", removed.State)
+	if removed.Workspace.State != domain.WorkspaceRemoved {
+		t.Fatalf("state=%s", removed.Workspace.State)
 	}
 	if out := gitCmd(t, f.root, "worktree", "list", "--porcelain"); strings.Contains(out, info.Workspace.Path) {
 		t.Fatalf("stale registration survived: %q", out)
@@ -580,7 +580,7 @@ func TestRemoveFailedWorkspaceAllowsFreshAllocation(t *testing.T) {
 	f.stub.addErr = nil
 
 	removed, err := f.svc.RemoveWorkspace(ctx, task.ID, RemoveWorkspaceOptions{Identity: &f.identity})
-	if err != nil || removed.State != domain.WorkspaceRemoved {
+	if err != nil || removed.Workspace.State != domain.WorkspaceRemoved {
 		t.Fatalf("removed=%+v err=%v", removed, err)
 	}
 	info, err := f.svc.CreateWorkspace(ctx, task.ID, f.identity, "")
@@ -603,8 +603,8 @@ func TestRemoveWorkspacePruneFailureStillPersistsRemoved(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "simulated prune failure") {
 		t.Fatalf("err=%v", err)
 	}
-	if removed.State != domain.WorkspaceRemoved {
-		t.Fatalf("returned workspace state=%s want removed", removed.State)
+	if removed.Workspace.State != domain.WorkspaceRemoved {
+		t.Fatalf("returned workspace state=%s want removed", removed.Workspace.State)
 	}
 	if _, statErr := os.Stat(info.Workspace.Path); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("worktree directory still exists: %v", statErr)
@@ -629,8 +629,8 @@ func TestRemoveWorkspaceDeleteBranchFailureStillPersistsRemoved(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "simulated branch deletion failure") {
 		t.Fatalf("err=%v", err)
 	}
-	if removed.State != domain.WorkspaceRemoved {
-		t.Fatalf("returned workspace state=%s want removed", removed.State)
+	if removed.Workspace.State != domain.WorkspaceRemoved {
+		t.Fatalf("returned workspace state=%s want removed", removed.Workspace.State)
 	}
 	live, liveErr := f.store.LiveWorkspaceForTask(ctx, task.ID)
 	if liveErr != nil || live != nil {
@@ -665,7 +665,7 @@ func TestRemoveWorkspaceWorktreeRemovalFailureKeepsRowLive(t *testing.T) {
 	}
 	// The removal is retryable once the failure clears.
 	f.stub.removeErr = nil
-	if removed, removeErr := f.svc.RemoveWorkspace(ctx, task.ID, RemoveWorkspaceOptions{Identity: &f.identity}); removeErr != nil || removed.State != domain.WorkspaceRemoved {
+	if removed, removeErr := f.svc.RemoveWorkspace(ctx, task.ID, RemoveWorkspaceOptions{Identity: &f.identity}); removeErr != nil || removed.Workspace.State != domain.WorkspaceRemoved {
 		t.Fatalf("retry removed=%+v err=%v", removed, removeErr)
 	}
 }
@@ -675,6 +675,49 @@ func TestRemoveWorkspaceWithoutWorkspaceIsNotFound(t *testing.T) {
 	task := f.claimedTask("no workspace")
 	if _, err := f.svc.RemoveWorkspace(context.Background(), task.ID, RemoveWorkspaceOptions{Identity: &f.identity}); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("err=%v want ErrNotFound", err)
+	}
+}
+
+func TestShowAndListWorkspacesDeriveUsage(t *testing.T) {
+	f := newWorkspaceFixture(t, true)
+	ctx := context.Background()
+	task := f.claimedTask("shown")
+	created, err := f.svc.CreateWorkspace(ctx, task.ID, f.identity, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.ActiveClaim == nil || created.Usage() != domain.WorkspaceInUse {
+		t.Fatalf("created info=%+v", created)
+	}
+
+	info, err := f.svc.ShowWorkspace(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Workspace.ID != created.Workspace.ID || info.Usage() != domain.WorkspaceInUse || info.ActiveClaim.InstanceID != f.identity.InstanceID {
+		t.Fatalf("shown info=%+v", info)
+	}
+	if info.ProjectRoot != f.root || info.Database != f.dbPath || info.GitCommonDir != filepath.Join(f.root, ".git") {
+		t.Fatalf("launcher facts=%+v", info)
+	}
+
+	// Completion releases the claim without touching the workspace: the same
+	// row now derives idle.
+	if _, err = f.store.CompleteClaimedTask(ctx, task.ID, "done", f.identity, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	info, err = f.svc.ShowWorkspace(ctx, task.ID)
+	if err != nil || info.Usage() != domain.WorkspaceIdle || info.ActiveClaim != nil {
+		t.Fatalf("idle info=%+v err=%v", info, err)
+	}
+
+	infos, err := f.svc.ListWorkspaces(ctx)
+	if err != nil || len(infos) != 1 || infos[0].Workspace.ID != created.Workspace.ID {
+		t.Fatalf("list=%+v err=%v", infos, err)
+	}
+
+	if _, err = f.svc.ShowWorkspace(ctx, 99); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("missing task err=%v want ErrNotFound", err)
 	}
 }
 
