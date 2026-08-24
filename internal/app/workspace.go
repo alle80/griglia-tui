@@ -227,6 +227,14 @@ type RemoveWorkspaceOptions struct {
 // because a failed allocation never proved the branch is griglia's. A missing
 // directory is tolerated as the documented recovery: git metadata is pruned
 // and the row still transitions to removed.
+//
+// Persisted state must match resource reality: the row transitions to
+// removed as soon as the worktree is removed (or confirmed absent) — before
+// registration pruning and optional branch deletion, which are post-removal
+// cleanup. If cleanup fails, the already-removed workspace is returned
+// together with the error; a live row is never left behind for a resource
+// that no longer exists. Conversely, when the worktree removal itself fails,
+// nothing is persisted and the row stays live.
 func (s *WorkspaceService) RemoveWorkspace(ctx context.Context, taskID int64, opts RemoveWorkspaceOptions) (domain.Workspace, error) {
 	if opts.Identity != nil {
 		if err := validateIdentity(*opts.Identity); err != nil {
@@ -276,19 +284,30 @@ func (s *WorkspaceService) RemoveWorkspace(ctx context.Context, taskID int64, op
 			return domain.Workspace{}, err
 		}
 	}
-	if err = s.git.PruneWorktrees(ctx, s.projectRoot); err != nil {
+	// The worktree is gone (or was already absent): persist removed before
+	// any further cleanup, so no later failure can leave a live row for a
+	// resource that no longer exists.
+	removed, err := s.store.RemoveWorkspace(ctx, w.ID, s.now().UTC())
+	if err != nil {
 		return domain.Workspace{}, err
 	}
+	var cleanup []error
+	if pruneErr := s.git.PruneWorktrees(ctx, s.projectRoot); pruneErr != nil {
+		cleanup = append(cleanup, pruneErr)
+	}
 	if opts.DeleteBranch && w.State == domain.WorkspaceReady {
-		if exists, branchErr := s.git.BranchExists(ctx, s.projectRoot, w.Branch); branchErr != nil {
-			return domain.Workspace{}, branchErr
-		} else if exists {
-			if err = s.git.DeleteBranch(ctx, s.projectRoot, w.Branch); err != nil {
-				return domain.Workspace{}, err
+		if branchExists, branchErr := s.git.BranchExists(ctx, s.projectRoot, w.Branch); branchErr != nil {
+			cleanup = append(cleanup, branchErr)
+		} else if branchExists {
+			if deleteErr := s.git.DeleteBranch(ctx, s.projectRoot, w.Branch); deleteErr != nil {
+				cleanup = append(cleanup, deleteErr)
 			}
 		}
 	}
-	return s.store.RemoveWorkspace(ctx, w.ID, s.now().UTC())
+	if len(cleanup) > 0 {
+		return removed, fmt.Errorf("workspace removed, but post-removal cleanup failed: %w", errors.Join(cleanup...))
+	}
+	return removed, nil
 }
 
 // removalTarget resolves which row a by-task removal addresses: the live

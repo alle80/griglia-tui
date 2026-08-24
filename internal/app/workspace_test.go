@@ -27,7 +27,10 @@ import (
 
 type stubRunner struct {
 	GitRunner
-	addErr error
+	addErr          error
+	removeErr       error
+	pruneErr        error
+	deleteBranchErr error
 }
 
 func (s *stubRunner) AddWorktree(ctx context.Context, repoDir, path, branch, commit string) error {
@@ -35,6 +38,27 @@ func (s *stubRunner) AddWorktree(ctx context.Context, repoDir, path, branch, com
 		return s.addErr
 	}
 	return s.GitRunner.AddWorktree(ctx, repoDir, path, branch, commit)
+}
+
+func (s *stubRunner) RemoveWorktree(ctx context.Context, repoDir, path string, force bool) error {
+	if s.removeErr != nil {
+		return s.removeErr
+	}
+	return s.GitRunner.RemoveWorktree(ctx, repoDir, path, force)
+}
+
+func (s *stubRunner) PruneWorktrees(ctx context.Context, repoDir string) error {
+	if s.pruneErr != nil {
+		return s.pruneErr
+	}
+	return s.GitRunner.PruneWorktrees(ctx, repoDir)
+}
+
+func (s *stubRunner) DeleteBranch(ctx context.Context, repoDir, branch string) error {
+	if s.deleteBranchErr != nil {
+		return s.deleteBranchErr
+	}
+	return s.GitRunner.DeleteBranch(ctx, repoDir, branch)
 }
 
 type wsFixture struct {
@@ -562,6 +586,87 @@ func TestRemoveFailedWorkspaceAllowsFreshAllocation(t *testing.T) {
 	info, err := f.svc.CreateWorkspace(ctx, task.ID, f.identity, "")
 	if err != nil || info.Workspace.State != domain.WorkspaceReady {
 		t.Fatalf("fresh allocation=%+v err=%v", info, err)
+	}
+}
+
+func TestRemoveWorkspacePruneFailureStillPersistsRemoved(t *testing.T) {
+	f := newWorkspaceFixture(t, true)
+	ctx := context.Background()
+	task := f.claimedTask("prune fails")
+	info, err := f.svc.CreateWorkspace(ctx, task.ID, f.identity, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.stub.pruneErr = errors.New("simulated prune failure")
+
+	removed, err := f.svc.RemoveWorkspace(ctx, task.ID, RemoveWorkspaceOptions{Identity: &f.identity})
+	if err == nil || !strings.Contains(err.Error(), "simulated prune failure") {
+		t.Fatalf("err=%v", err)
+	}
+	if removed.State != domain.WorkspaceRemoved {
+		t.Fatalf("returned workspace state=%s want removed", removed.State)
+	}
+	if _, statErr := os.Stat(info.Workspace.Path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("worktree directory still exists: %v", statErr)
+	}
+	live, liveErr := f.store.LiveWorkspaceForTask(ctx, task.ID)
+	if liveErr != nil || live != nil {
+		t.Fatalf("row must not stay live after the worktree is gone: %+v err=%v", live, liveErr)
+	}
+}
+
+func TestRemoveWorkspaceDeleteBranchFailureStillPersistsRemoved(t *testing.T) {
+	f := newWorkspaceFixture(t, true)
+	ctx := context.Background()
+	task := f.claimedTask("branch delete fails")
+	info, err := f.svc.CreateWorkspace(ctx, task.ID, f.identity, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.stub.deleteBranchErr = errors.New("simulated branch deletion failure")
+
+	removed, err := f.svc.RemoveWorkspace(ctx, task.ID, RemoveWorkspaceOptions{Identity: &f.identity, DeleteBranch: true})
+	if err == nil || !strings.Contains(err.Error(), "simulated branch deletion failure") {
+		t.Fatalf("err=%v", err)
+	}
+	if removed.State != domain.WorkspaceRemoved {
+		t.Fatalf("returned workspace state=%s want removed", removed.State)
+	}
+	live, liveErr := f.store.LiveWorkspaceForTask(ctx, task.ID)
+	if liveErr != nil || live != nil {
+		t.Fatalf("row must not stay live after the worktree is gone: %+v err=%v", live, liveErr)
+	}
+	// The failed deletion leaves the branch in place — resource reality the
+	// caller can still act on.
+	if out := gitCmd(t, f.root, "branch", "--list", info.Workspace.Branch); out == "" {
+		t.Fatal("branch should still exist after the failed deletion")
+	}
+}
+
+func TestRemoveWorkspaceWorktreeRemovalFailureKeepsRowLive(t *testing.T) {
+	f := newWorkspaceFixture(t, true)
+	ctx := context.Background()
+	task := f.claimedTask("worktree removal fails")
+	info, err := f.svc.CreateWorkspace(ctx, task.ID, f.identity, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.stub.removeErr = errors.New("simulated worktree removal failure")
+
+	if _, err = f.svc.RemoveWorkspace(ctx, task.ID, RemoveWorkspaceOptions{Identity: &f.identity}); err == nil || !strings.Contains(err.Error(), "simulated worktree removal failure") {
+		t.Fatalf("err=%v", err)
+	}
+	live, liveErr := f.store.LiveWorkspaceForTask(ctx, task.ID)
+	if liveErr != nil || live == nil || live.State != domain.WorkspaceReady {
+		t.Fatalf("row must stay live when the worktree was not removed: %+v err=%v", live, liveErr)
+	}
+	if _, statErr := os.Stat(info.Workspace.Path); statErr != nil {
+		t.Fatalf("worktree must still exist: %v", statErr)
+	}
+	// The removal is retryable once the failure clears.
+	f.stub.removeErr = nil
+	if removed, removeErr := f.svc.RemoveWorkspace(ctx, task.ID, RemoveWorkspaceOptions{Identity: &f.identity}); removeErr != nil || removed.State != domain.WorkspaceRemoved {
+		t.Fatalf("retry removed=%+v err=%v", removed, removeErr)
 	}
 }
 
