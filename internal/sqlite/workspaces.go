@@ -169,6 +169,33 @@ func (s *Store) LiveWorkspaceForTask(ctx context.Context, taskID int64) (*domain
 	return &w, nil
 }
 
+// WorkspacesForTask returns every workspace row ever recorded for the task —
+// failed and removed history included — in creation order. Allocation retries
+// use it to recognize leftovers of the task's own earlier attempts, and
+// removal uses it to address failed rows that are no longer live.
+func (s *Store) WorkspacesForTask(ctx context.Context, taskID int64) ([]domain.Workspace, error) {
+	var exists int
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM tasks WHERE id=?`, taskID).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+		return nil, domain.ErrNotFound
+	} else if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT `+workspaceColumns+` FROM workspaces WHERE task_id=? ORDER BY id ASC`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	workspaces := make([]domain.Workspace, 0)
+	for rows.Next() {
+		w, scanErr := scanWorkspace(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		workspaces = append(workspaces, w)
+	}
+	return workspaces, rows.Err()
+}
+
 // ListWorkspaces returns every persisted workspace row, including failed and
 // removed history, in creation order.
 func (s *Store) ListWorkspaces(ctx context.Context) ([]domain.Workspace, error) {
