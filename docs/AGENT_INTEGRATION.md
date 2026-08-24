@@ -67,6 +67,66 @@ If you cannot finish, hand the task back instead:
 griglia task release "$task_id" "${ID_FLAGS[@]}" --reason "needs a different toolchain" --json
 ```
 
+## Isolated workspaces (Git worktrees)
+
+In Git-backed projects, the claim owner can allocate an isolated worktree and
+managed branch for the task instead of sharing the main checkout
+([WORKSPACES.md](WORKSPACES.md)):
+
+```bash
+ws=$(griglia workspace create "$task_id" "${ID_FLAGS[@]}" --json)
+path=$(echo "$ws" | jq -r '.data.workspace.path')
+project_root=$(echo "$ws" | jq -r '.data.workspace.project_root')
+
+cd "$path"
+export GRIGLIA_PROJECT="$project_root"   # pin the board before any further command
+```
+
+- **Pin the project explicitly.** Worktrees live *outside* the main checkout
+  (`<project-parent>/.griglia-worktrees/<name>/task-N/`), so upward discovery
+  cannot find the board from inside one — and could silently resolve an
+  unrelated ancestor project. Export `GRIGLIA_PROJECT=<project_root>` (or
+  pass `--project` per command; the flag wins over the environment variable)
+  for every griglia command run from the worktree.
+- `workspace create` requires the identity that owns the task's active claim
+  and is idempotent: re-creating returns the existing ready workspace with
+  its persisted branch. `--base REF` overrides the default base (`HEAD` of
+  the main checkout).
+- The workspace survives `release`, `done`, and `cancel` untouched: the
+  branch and work-in-progress stay in place for review, and a later claim of
+  the task — by any identity — resumes in the same worktree. Publishing the
+  branch and opening PRs remain your job; Griglia never touches the network.
+- `workspace show TASK_ID --json` / `workspace list --json` report the
+  persisted `state`, the derived `usage` (`in_use`/`idle`) and
+  `active_claim`, and the absolute launcher facts. Failed allocations stay
+  visible (state `failed` with the git diagnostic in `error`) until retried
+  or removed.
+- Cleanup is `workspace remove TASK_ID`: human-operable while idle; the
+  owning identity or `--force` while the task is claimed. The branch is kept
+  unless `--delete-branch`; uncommitted changes are refused without
+  `--force`.
+- Git failures use exit 1 with the stable `error.code` `"git_error"`; the
+  message carries the git stderr.
+
+### Sandbox profile for launchers
+
+A launcher that sandboxes agents should run `workspace create … --json`,
+read the payload, start the agent with cwd = `path` and
+`GRIGLIA_PROJECT=<project_root>` exported, and derive permissions from the
+payload's absolute paths — never from hardcoded layout:
+
+| Payload path | Access | Why |
+|---|---|---|
+| `path` | read/write | the agent's own worktree |
+| `git_common_dir` | read/write | shared objects/refs and the worktree's registration |
+| `database` plus its `-wal`/`-shm` companions | read/write | the authoritative board |
+| other entries under the workspace root | none | isolation between agents |
+| the main checkout | none or read-only | write access would recreate shared-tree conflicts |
+
+The database is the coordination channel and filesystem permissions are the
+trust boundary: an agent with database write access can act as any identity.
+Workspaces isolate file work, not board authority.
+
 ## Dependency-aware "no work" behavior
 
 `claim-next` only ever returns tasks whose prerequisites are all `done`. If

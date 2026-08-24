@@ -33,6 +33,7 @@ diagnostic text and may change between releases.
 |---|---|---|
 | 0 | — | success |
 | 1 | `internal_error` | unexpected failure (detail on stderr) |
+| 1 | `git_error` | a Git operation failed during a workspace command (message carries the git diagnostic) |
 | 2 | `invalid_input` | usage, argument, or validation error |
 | 3 | `project_not_initialized` | no `.griglia/griglia.db` found |
 | 4 | `not_found` | task or question does not exist |
@@ -115,6 +116,46 @@ after an answer exists and freezes it.
 cancelled prerequisites stay unsatisfied. `task undepend` returns a reduced
 edge object: `{"task_id","depends_on_task_id"}`.
 
+## Workspace DTO
+
+```json
+{
+  "task_id": 7,
+  "state": "ready",
+  "usage": "in_use",
+  "active_claim": {"agent_name":"claude","instance_id":"session-1","claimed_at":"2026-08-23T14:11:40.680742Z"},
+  "path": "/home/user/Projects/.griglia-worktrees/myproj/task-7",
+  "branch": "griglia/task-7-build-feature",
+  "base_commit": "dfe0349c1b2a4c8d9e0f1a2b3c4d5e6f7a8b9c0d",
+  "created_by": {"agent_name":"claude","instance_id":"session-1"},
+  "project_root": "/home/user/Projects/myproj",
+  "database": "/home/user/Projects/myproj/.griglia/griglia.db",
+  "git_common_dir": "/home/user/Projects/myproj/.git",
+  "created_at": "2026-08-23T14:11:38.000000Z",
+  "updated_at": "2026-08-23T14:11:40.680742Z",
+  "error": ""
+}
+```
+
+- `state` ∈ `allocating | ready | failed | removed` — the persisted lifecycle
+  of the Git resource itself. It never encodes ownership.
+- `usage` ∈ `in_use | idle` and `active_claim` are derived from the claims
+  table at read time: `in_use` exactly when the task currently has an active
+  claim, whose identity is `active_claim` (`null` when idle). They are never
+  persisted on the workspace.
+- `created_by` is audit provenance — the identity whose claim allocated the
+  workspace — never an input to ownership checks.
+- `path`, `project_root`, `database`, and `git_common_dir` are always
+  absolute: the launcher facts for deriving sandbox permissions and pinning
+  `GRIGLIA_PROJECT`.
+- `error` carries the git diagnostic for `failed` workspaces, else `""`.
+- `workspace show`/`workspace list` return each task's *current* workspace:
+  the live (`allocating` or `ready`) row, or the latest `failed` row when the
+  last allocation attempt failed. `removed` rows are history and never
+  surface; `workspace list` is ordered by `task_id`.
+- The Task DTO is unchanged by the workspace feature: workspace facts appear
+  only in workspace payloads.
+
 ## Command payloads
 
 | Command | `data` shape |
@@ -129,11 +170,19 @@ edge object: `{"task_id","depends_on_task_id"}`.
 | `task depend` | `{"dependency": Dependency}` |
 | `task undepend` | `{"dependency":{"task_id","depends_on_task_id"}}` |
 | `task dependencies` | `{"dependencies": [Dependency]}` |
+| `workspace create` / `show` / `remove` | `{"workspace": Workspace}` |
+| `workspace list` | `{"workspaces": [Workspace]}` |
 
 Commands intended for agents (identity required): `claim`, `claim-next`,
-`progress`, `release`, `ask`, `acknowledge`, and `done` with `--agent`.
+`progress`, `release`, `ask`, `acknowledge`, `done` with `--agent`, and
+`workspace create` (the identity must own the task's active claim).
 Commands intended for humans: everything else; `answer` is explicitly the
-human side of the question flow.
+human side of the question flow. `workspace show`/`list` are open reads;
+`workspace remove` needs no identity while the workspace is idle, and the
+owning identity or `--force` while the task is claimed. When removal
+succeeds but post-removal cleanup fails, the command reports `git_error`
+with a message beginning `workspace removed, but post-removal cleanup
+failed` — the row is genuinely `removed`.
 
 ## Compatibility policy
 

@@ -14,6 +14,7 @@ import (
 
 	"github.com/alle80/griglia-tui/internal/app"
 	"github.com/alle80/griglia-tui/internal/domain"
+	gitrunner "github.com/alle80/griglia-tui/internal/git"
 	grsqlite "github.com/alle80/griglia-tui/internal/sqlite"
 	"github.com/alle80/griglia-tui/internal/tui"
 	"github.com/spf13/cobra"
@@ -114,7 +115,7 @@ func (s *state) root() *cobra.Command {
 	})
 	root.PersistentFlags().StringVar(&s.project, "project", "", "project root or database path")
 	root.PersistentFlags().BoolVar(&s.json, "json", false, "emit the JSON protocol")
-	root.AddCommand(s.initCommand(), s.versionCommand(), s.taskCommand())
+	root.AddCommand(s.initCommand(), s.versionCommand(), s.taskCommand(), s.workspaceCommand())
 	return root
 }
 
@@ -838,21 +839,24 @@ type claimDTO struct {
 	ClaimedAt  string `json:"claimed_at"`
 }
 
-type askedByDTO struct {
+// identityDTO is the reduced agent identity used for audit provenance fields
+// (question asked_by, workspace created_by) — never for live claims, which
+// carry claimed_at in claimDTO.
+type identityDTO struct {
 	AgentName  string `json:"agent_name"`
 	InstanceID string `json:"instance_id"`
 }
 
 type questionDTO struct {
-	ID             int64      `json:"id"`
-	TaskID         int64      `json:"task_id"`
-	Body           string     `json:"body"`
-	Blocking       bool       `json:"blocking"`
-	AskedBy        askedByDTO `json:"asked_by"`
-	AskedAt        string     `json:"asked_at"`
-	Answer         *string    `json:"answer"`
-	AnsweredAt     *string    `json:"answered_at"`
-	AcknowledgedAt *string    `json:"acknowledged_at"`
+	ID             int64       `json:"id"`
+	TaskID         int64       `json:"task_id"`
+	Body           string      `json:"body"`
+	Blocking       bool        `json:"blocking"`
+	AskedBy        identityDTO `json:"asked_by"`
+	AskedAt        string      `json:"asked_at"`
+	Answer         *string     `json:"answer"`
+	AnsweredAt     *string     `json:"answered_at"`
+	AcknowledgedAt *string     `json:"acknowledged_at"`
 }
 
 type dependencyDTO struct {
@@ -868,7 +872,7 @@ func toDependencyDTO(d domain.DependencyView) dependencyDTO {
 }
 
 func toQuestionDTO(q domain.Question) questionDTO {
-	d := questionDTO{ID: q.ID, TaskID: q.TaskID, Body: q.Body, Blocking: q.Blocking, AskedBy: askedByDTO{AgentName: q.AskedBy.AgentName, InstanceID: q.AskedBy.InstanceID}, AskedAt: formatJSONTime(q.AskedAt), Answer: q.Answer}
+	d := questionDTO{ID: q.ID, TaskID: q.TaskID, Body: q.Body, Blocking: q.Blocking, AskedBy: identityDTO{AgentName: q.AskedBy.AgentName, InstanceID: q.AskedBy.InstanceID}, AskedAt: formatJSONTime(q.AskedAt), Answer: q.Answer}
 	if q.AnsweredAt != nil {
 		v := formatJSONTime(*q.AnsweredAt)
 		d.AnsweredAt = &v
@@ -939,6 +943,14 @@ func mapError(err error) *commandError {
 	}
 	if grsqlite.IsBusy(err) {
 		return &commandError{6, "busy", "database is temporarily busy"}
+	}
+	// Git side-effect failures on workspace commands: the stable git_error
+	// code, with the git diagnostic in the message (docs/WORKSPACES.md §10).
+	// Domain sentinels take precedence above, so a git-probed conflict or
+	// invalid ref keeps its usual code.
+	var gitErr *gitrunner.Error
+	if errors.As(err, &gitErr) {
+		return &commandError{1, "git_error", err.Error()}
 	}
 	return &commandError{1, "internal_error", "internal error"}
 }
